@@ -1,0 +1,136 @@
+# AI Model Lightweight Platform - CPU-only single-host compose
+# ------------------------------------------------------------
+# 用法（在项目根目录）：
+#   1) cp .env.cpu.example .env.cpu  并填写（secret 用 openssl rand -hex 32 之类生成）
+#   2) docker compose -f compose.cpu.yml --env-file .env.cpu up -d --build
+#   3) 打开 http://<服务器IP>:8001  （API 文档 http://<服务器IP>:8001/docs）
+#
+# 说明：
+#   - 无 Traefik/域名依赖，直接发布 8001 端口访问（8000 被 mineru-api 占用，故避开）。
+#     容器内部仍监听 8000（healthcheck 不变），仅宿主机对外映射改为 8001。
+#   - db / redis 仅内网可达；模型文件存于命名卷 models-data。
+#   - backend 启动前自动跑 alembic 迁移 + 初始化超级管理员（幂等）。
+#   - worker 与 backend 同镜像，跑 Arq（默认同时只跑 1 个压缩任务，适合 CPU）。
+#   - 邮件：默认关闭（注册/找回密码不会发信）。需要发信时用外部 SMTP，
+#     或加 --profile email 起本地 Mailpit（http://IP:8025 看信）。
+
+services:
+  db:
+    image: postgres:18
+    restart: unless-stopped
+    environment:
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD 未设置}
+      POSTGRES_DB: app
+    volumes:
+      - app-db-data:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d app"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  # 本地邮件调试（可选）：docker compose ... --profile email up
+  mailpit:
+    image: axllent/mailpit:v1
+    profiles: ["email"]
+    restart: unless-stopped
+    ports:
+      - "8025:8025"
+
+  backend:
+    image: backend:latest
+    restart: unless-stopped
+    build:
+      context: .
+      dockerfile: backend/Dockerfile.cpu
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      PROJECT_NAME: ${PROJECT_NAME:?PROJECT_NAME 未设置}
+      # 生产模式下必须是非 "changethis" 的随机值（FASTAPI_ENV 留空即生产）
+      SECRET_KEY: ${SECRET_KEY:?SECRET_KEY 未设置}
+      FIRST_SUPERUSER: ${FIRST_SUPERUSER:?FIRST_SUPERUSER 未设置}
+      FIRST_SUPERUSER_PASSWORD: ${FIRST_SUPERUSER_PASSWORD:?FIRST_SUPERUSER_PASSWORD 未设置}
+      FASTAPI_ENV: ${FASTAPI_ENV:-}
+      DATABASE_URL: postgresql://postgres:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD 未设置}@db:5432/app
+      REDIS_URL: redis://redis:6379/0
+      FRONTEND_HOST: ${FRONTEND_HOST:-http://localhost:8001}
+      MODEL_STORAGE_PATH: /app/backend/models-storage
+      MAX_MODEL_DOWNLOAD_BYTES: ${MAX_MODEL_DOWNLOAD_BYTES:-10737418240}
+      USER_STORAGE_QUOTA_BYTES: ${USER_STORAGE_QUOTA_BYTES:-53687091200}
+      SMTP_HOST: ${SMTP_HOST:-}
+      SMTP_PORT: ${SMTP_PORT:-587}
+      SMTP_TLS: ${SMTP_TLS:-true}
+      SMTP_USER: ${SMTP_USER:-}
+      SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+      EMAILS_FROM_EMAIL: ${EMAILS_FROM_EMAIL:-}
+      SENTRY_DSN: ${SENTRY_DSN:-}
+    # 先跑迁移/初始化，再以多 worker 启动 Web（迁移对并发安全，单容器执行即可）
+    command:
+      - sh
+      - -c
+      - "./scripts/prestart.sh && exec fastapi run --host 0.0.0.0 --port 8000 --workers ${WEB_CONCURRENCY:-2}"
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/api/v1/utils/health-check/', timeout=5).status==200 else 1)"
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 40s
+    volumes:
+      - models-data:/app/backend/models-storage
+    ports:
+      - "8001:8000"
+
+  worker:
+    image: backend:latest
+    restart: unless-stopped
+    build:
+      context: .
+      dockerfile: backend/Dockerfile.cpu
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      backend:
+        condition: service_healthy
+    environment:
+      PROJECT_NAME: ${PROJECT_NAME:?PROJECT_NAME 未设置}
+      SECRET_KEY: ${SECRET_KEY:?SECRET_KEY 未设置}
+      FIRST_SUPERUSER: ${FIRST_SUPERUSER:?FIRST_SUPERUSER 未设置}
+      FIRST_SUPERUSER_PASSWORD: ${FIRST_SUPERUSER_PASSWORD:?FIRST_SUPERUSER_PASSWORD 未设置}
+      FASTAPI_ENV: ${FASTAPI_ENV:-}
+      DATABASE_URL: postgresql://postgres:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD 未设置}@db:5432/app
+      REDIS_URL: redis://redis:6379/0
+      MODEL_STORAGE_PATH: /app/backend/models-storage
+      MAX_MODEL_DOWNLOAD_BYTES: ${MAX_MODEL_DOWNLOAD_BYTES:-10737418240}
+      USER_STORAGE_QUOTA_BYTES: ${USER_STORAGE_QUOTA_BYTES:-53687091200}
+      WORKER_MAX_JOBS: ${WORKER_MAX_JOBS:-1}
+    command: ["arq", "app.worker.WorkerSettings"]
+    volumes:
+      - models-data:/app/backend/models-storage
+
+volumes:
+  app-db-data:
+  redis-data:
+  models-data:
