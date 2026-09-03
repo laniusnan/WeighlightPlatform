@@ -1,0 +1,31 @@
+.vscode/*
+!.vscode/extensions.json
+node_modules/
+backend/app/frontend/
+/test-results/
+/playwright-report/
+/blob-report/
+/playwright/.cache/
+
+# Python / env / secrets
+.venv/
+__pycache__/
+*.pyc
+.env
+.env.cpu
+frontend/.env
+*.local
+
+# local artifacts / models
+models-storage/
+backend/models-storage/
+.ruff_cache/
+.pytest_cache/
+
+# logs & misc
+*.log
+cpu-build.log
+ui-preview/
+dist/
+*.tgz
+.DS_Store

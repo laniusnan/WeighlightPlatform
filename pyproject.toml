@@ -1,0 +1,52 @@
+[dependency-groups]
+dev = [
+    "prek>=0.4.11,<1.0.0",
+    "typer>=0.26.1,<1.0.0",
+    "zizmor>=1.28.0",
+]
+
+github-actions = [
+    "smokeshow >=0.5.0",
+]
+
+[tool.uv.workspace]
+members = ["backend"]
+
+# CPU-only platform: resolve `torch` from PyTorch's official CPU wheel index.
+# PyPI's default Linux torch wheels bundle CUDA runtime (~2 GB of nvidia-*
+# packages) that a CPU-only server never uses.
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+
+[tool.uv.sources]
+# CPU-only torch: pull from PyTorch's CPU wheel index.
+torch = { index = "pytorch-cpu" }
+
+[tool.uv]
+# Keep the exact same torch version as before (just the CPU build +cpu) so the
+# rest of the dependency tree (optimum etc.) is untouched.
+override-dependencies = ["torch==2.13.0+cpu"]
+
+[tool.typos.files]
+extend-exclude = [
+    "img/",
+    "uv.lock",
+    "bun.lock",
+    "backend/coverage/",
+    "backend/htmlcov/",
+    "backend/app/frontend/",
+    "frontend/dist/",
+    "frontend/public/assets/images/",
+]
+
+[tool.typos.default]
+extend-ignore-re = [
+    # GitHub usernames in @mentions
+    "@[a-zA-Z0-9](?:-?[a-zA-Z0-9])*",
+    # Name of the package in the PR title
+    "Bump certifi ",
+]
+
+[tool.typos.default.extend-identifiers]
+alls = "alls"

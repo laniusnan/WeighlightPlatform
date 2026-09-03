@@ -1,0 +1,55 @@
+/* =====================================================================
+   科技蓝紫 · 暗色主题令牌（Obsidian 淘汰，统一 .theme-dark）
+   ===================================================================== */
+.theme-dark {
+  --lb-bg: #0f0f13;
+  --lb-bg-soft: #13131b;
+  --lb-surface: #1a1a24;
+  --lb-surface-2: #20202c;
+  --lb-border: rgb(255 255 255 / 0.09);
+  --lb-border-strong: rgb(255 255 255 / 0.18);
+  --lb-primary: #6366f1;
+  --lb-primary-dark: #5558e8;
+  --lb-primary-foreground: #ffffff;
+  --lb-primary-soft: rgb(99 102 241 / 0.14);
+  --lb-cyan: #38bdf8;
+  --lb-purple: #a78bfa;
+  --lb-purple-soft: rgb(168 85 247 / 0.16);
+  --lb-gradient: linear-gradient(135deg, #6366f1 0%, #a855f7 100%);
+  --lb-progress: linear-gradient(90deg, #6366f1 0%, #a855f7 100%);
+  --lb-text: #f0f0f5;
+  --lb-text-2: #b6b6c8;
+  --lb-muted: #8f8fa3;
+  --lb-success: #34d399;
+  --lb-success-soft: rgb(52 211 153 / 0.14);
+  --lb-warn: #fbbf24;
+  --lb-warn-soft: rgb(251 191 36 / 0.13);
+  --lb-danger: #f87171;
+  --lb-danger-soft: rgb(248 113 113 / 0.14);
+  --lb-shadow-sm: 0 1px 2px rgb(0 0 0 / 0.3);
+  --lb-shadow-md: 0 8px 26px rgb(0 0 0 / 0.5);
+  --lb-radius-sm: 4px;
+  --lb-radius: 8px;
+  --lb-radius-lg: 10px;
+}
+
+.theme-dark {
+  background: var(--lb-bg);
+  color: var(--lb-text);
+  min-height: 100vh;
+  color-scheme: dark;
+}
+
+/* 卡片毛玻璃（#1a1a24 半透明） */
+.theme-dark .lb-card {
+  background: color-mix(in srgb, var(--lb-surface) 72%, transparent);
+  backdrop-filter: blur(12px);
+}
+.theme-dark .lb-card-white {
+  background: color-mix(in srgb, var(--lb-surface) 62%, transparent);
+  backdrop-filter: blur(12px);
+}
+.theme-dark .lb-nav {
+  background: color-mix(in srgb, var(--lb-surface) 78%, transparent);
+  backdrop-filter: blur(10px);
+}

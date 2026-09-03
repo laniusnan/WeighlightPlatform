@@ -1,0 +1,123 @@
+[project]
+name = "app"
+version = "0.1.0"
+description = ""
+requires-python = ">=3.14,<4.0"
+dependencies = [
+    "fastapi[standard]>=0.141.1,<1.0.0",
+    "python-multipart<1.0.0,>=0.0.27",
+    "email-validator<3.0.0.0,>=2.1.0.post1",
+    "pydantic>2.0",
+    "emails>=1.1.2,<2.0",
+    "jinja2<4.0.0,>=3.1.4",
+    "alembic<2.0.0,>=1.12.1",
+    "httpx<1.0.0,>=0.25.1",
+    "psycopg[binary]>=3.3.4,<4.0.0",
+    "sqlmodel>=0.0.39,<1.0.0",
+    "pydantic-settings<3.0.0,>=2.2.1",
+    "sentry-sdk[fastapi]>=2.66.1,<3.0.0",
+    "pyjwt<3.0.0,>=2.13.0",
+    "pwdlib[argon2,bcrypt]>=0.3.0",
+    # --- Model compression platform (CPU-friendly toolchain) ---
+    "arq>=0.28,<1.0",
+    "redis>=5.0,<7.0",
+    "numpy>=1.26,<3.0",
+    "pillow>=10.0,<12.0",
+    "torch>=2.6,<3.0",
+    "onnx>=1.17,<2.0",
+    "onnxruntime>=1.20,<2.0",
+    "onnxsim>=0.4.36,<1.0",
+    "openvino>=2025.0,<2027.0",
+    "nncf>=3.0,<4.0",
+    "transformers>=4.50,<5.0",
+    "optimum>=1.21,<3.0",
+    "optimum-intel>=1.21,<3.0",
+    "accelerate>=1.0,<2.0",
+    "sentencepiece>=0.2.0,<1.0",
+    "protobuf>=4.25,<7.0",
+    "ultralytics>=8.3.0,<9.0",
+    "tqdm>=4.66,<5.0",
+    "torchao>=0.18.0",
+    "gguf>=0.19.0",
+]
+
+[dependency-groups]
+dev = [
+    "pytest<10.0.0,>=7.4.3",
+    "mypy<3.0.0,>=1.8.0",
+    "ty>=0.0.25",
+    "ruff<1.0.0,>=0.2.2",
+    "coverage<8.0.0,>=7.4.3",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.mypy]
+strict = true
+exclude = ["venv", ".venv", "alembic"]
+
+[[tool.mypy.overrides]]
+# ML toolchain packages are imported lazily inside job functions; many of
+# them ship no type stubs, so treat them as `Any` when installed or absent.
+module = [
+    "onnx.*",
+    "onnxsim",
+    "onnxruntime.*",
+    "openvino.*",
+    "nncf.*",
+    "optimum.*",
+    "transformers.*",
+    "sentencepiece.*",
+    "PIL.*",
+    "ultralytics.*",
+    "numpy",
+    "torch",
+    "tqdm",
+]
+ignore_missing_imports = true
+
+[tool.ruff]
+target-version = "py314"
+exclude = ["alembic"]
+
+[tool.ruff.lint]
+select = [
+    "E",  # pycodestyle errors
+    "W",  # pycodestyle warnings
+    "F",  # pyflakes
+    "I",  # isort
+    "B",  # flake8-bugbear
+    "C4",  # flake8-comprehensions
+    "UP",  # pyupgrade
+    "ARG001", # unused arguments in functions
+    "T201",   # print statements are not allowed
+]
+ignore = [
+    "E501",  # line too long, handled by black
+    "B008",  # do not perform function calls in argument defaults
+    "W191",  # indentation contains tabs
+    "B904",  # Allow raising exceptions without from e, for HTTPException
+]
+
+[tool.ruff.lint.pyupgrade]
+# Preserve types, even if a file imports `from __future__ import annotations`.
+keep-runtime-typing = true
+
+[tool.coverage.run]
+source = ["app"]
+dynamic_context = "test_function"
+
+[tool.coverage.report]
+show_missing = true
+sort = "-Cover"
+
+[tool.coverage.html]
+show_contexts = true
+
+[tool.ty.terminal]
+error-on-warning = true
+
+[tool.fastapi]
+entrypoint = "app.main:app"
