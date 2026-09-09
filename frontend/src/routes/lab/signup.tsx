@@ -8,13 +8,13 @@ import { useState } from "react"
 
 import { useI18n } from "@/components/lab/i18n"
 import { AuthBar } from "@/components/lab/AuthBar"
-import { isLoggedIn } from "@/hooks/useAuth"
+import { isSessionValid } from "@/services/http"
 import { apiLogin, apiSignUp } from "@/services/api"
 import { apiErrorMessage } from "@/services/http"
 
 export const Route = createFileRoute("/lab/signup")({
   beforeLoad: async () => {
-    if (isLoggedIn()) {
+    if (await isSessionValid()) {
       throw redirect({ to: "/lab/dashboard" })
     }
   },

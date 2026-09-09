@@ -8,7 +8,7 @@ import { createFileRoute, Outlet, redirect, useRouterState } from "@tanstack/rea
 import { Navbar } from "@/components/lab/Navbar"
 import { LabI18nProvider } from "@/components/lab/i18n"
 import { LabThemeProvider, useLabTheme } from "@/components/lab/theme"
-import { isLoggedIn } from "@/hooks/useAuth"
+import { isSessionValid } from "@/services/http"
 
 import "../styles/light-theme.css"
 import "../styles/dark-theme.css"
@@ -18,10 +18,11 @@ const PUBLIC_LAB_PAGES = ["/lab/login", "/lab/signup"]
 export const Route = createFileRoute("/lab")({
   beforeLoad: async ({ location }) => {
     const isPublic = PUBLIC_LAB_PAGES.includes(location.pathname)
-    if (!isLoggedIn() && !isPublic) {
+    const loggedIn = await isSessionValid()
+    if (!loggedIn && !isPublic) {
       throw redirect({ to: "/lab/login" })
     }
-    if (isLoggedIn() && isPublic) {
+    if (loggedIn && isPublic) {
       throw redirect({ to: "/lab/dashboard" })
     }
   },

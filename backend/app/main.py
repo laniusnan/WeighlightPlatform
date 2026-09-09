@@ -43,6 +43,35 @@ app.add_middleware(
 )
 
 app.include_router(api_router, prefix=settings.API_V1_STR)
-# SPA fallback: refresh / deep links (e.g. /report) serve index.html for
-# browser navigations; API routes are matched first and stay JSON.
-app.frontend("/", directory=FRONTEND_DIR, fallback="index.html")
+
+# SPA serving: static assets + index.html fallback (works on any Host/IP).
+# API routes above are matched first; unmatched /api/* keeps returning JSON 404.
+if (FRONTEND_DIR / "index.html").is_file():
+    from fastapi.responses import FileResponse
+    from fastapi.staticfiles import StaticFiles
+
+    assets_dir = FRONTEND_DIR / "assets"
+    if assets_dir.is_dir():
+        app.mount("/assets", StaticFiles(directory=assets_dir), name="assets")
+
+    _frontend_root = FRONTEND_DIR.resolve()
+
+    @app.get("/{path:path}", tags=["spa"], include_in_schema=False)
+    async def _spa(path: str) -> FileResponse:
+        if path.startswith(settings.API_V1_STR.lstrip("/")):
+            from fastapi import HTTPException
+
+            raise HTTPException(status_code=404, detail="Not Found")
+        candidate = (FRONTEND_DIR / path).resolve()
+        try:
+            candidate.relative_to(_frontend_root)
+        except ValueError:
+            candidate = FRONTEND_DIR
+        if candidate.is_file() and candidate != FRONTEND_DIR:
+            return FileResponse(candidate)
+        # index.html must never be cached long: assets are content-hashed and
+        # immutable, so only the HTML needs revalidation on every visit.
+        return FileResponse(
+            FRONTEND_DIR / "index.html",
+            headers={"Cache-Control": "no-cache"},
+        )

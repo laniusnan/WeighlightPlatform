@@ -24,9 +24,9 @@ url = "https://download.pytorch.org/whl/cpu"
 torch = { index = "pytorch-cpu" }
 
 [tool.uv]
-# Keep the exact same torch version as before (just the CPU build +cpu) so the
-# rest of the dependency tree (optimum etc.) is untouched.
-override-dependencies = ["torch==2.13.0+cpu"]
+# Decoder trace/quantization E2E is verified on torch 2.9.1 (+cpu); pin here so
+# optimum/transformers export paths work in the built image.
+override-dependencies = ["torch==2.9.1+cpu", "torchvision==0.24.1+cpu"]
 
 [tool.typos.files]
 extend-exclude = [

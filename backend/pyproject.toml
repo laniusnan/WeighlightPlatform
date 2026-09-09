@@ -2,7 +2,7 @@
 name = "app"
 version = "0.1.0"
 description = ""
-requires-python = ">=3.14,<4.0"
+requires-python = ">=3.11,<4.0"
 dependencies = [
     "fastapi[standard]>=0.141.1,<1.0.0",
     "python-multipart<1.0.0,>=0.0.27",
@@ -22,14 +22,17 @@ dependencies = [
     "arq>=0.28,<1.0",
     "redis>=5.0,<7.0",
     "numpy>=1.26,<3.0",
+    "openpyxl>=3.1,<4.0",  # Excel instruction-set parsing for llm_finetune
+    "tokenizers>=0.21,<0.22",
     "pillow>=10.0,<12.0",
     "torch>=2.6,<3.0",
+    "torchvision>=0.24,<0.26",
     "onnx>=1.17,<2.0",
     "onnxruntime>=1.20,<2.0",
     "onnxsim>=0.4.36,<1.0",
     "openvino>=2025.0,<2027.0",
     "nncf>=3.0,<4.0",
-    "transformers>=4.50,<5.0",
+    "transformers>=4.49,<4.50",
     "optimum>=1.21,<3.0",
     "optimum-intel>=1.21,<3.0",
     "accelerate>=1.0,<2.0",
@@ -37,7 +40,6 @@ dependencies = [
     "protobuf>=4.25,<7.0",
     "ultralytics>=8.3.0,<9.0",
     "tqdm>=4.66,<5.0",
-    "torchao>=0.18.0",
     "gguf>=0.19.0",
 ]
 

@@ -1,14 +1,18 @@
+import shutil
 import uuid
 from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse
+from pydantic import BaseModel
 from sqlmodel import col, func, select
 
 from app.api.deps import CurrentUser, SessionDep
+from app.core.config import settings
 from app.core.redis import enqueue_job
 from app.jobs.storage import (
+    dir_size,
     enforce_user_quota,
     model_dir,
     original_model_path,
@@ -306,6 +310,149 @@ async def pull_model_from_url(
     session.refresh(model)
     await enqueue_job("pull_model", model.id)
     return model
+
+
+class ImportLocalModelRequest(BaseModel):
+    """Import a HF-format model directory that lives on the server host."""
+
+    name: str | None = None
+    # Path *inside the container* under one of the read-only local roots,
+    # e.g. /models-local/Qwen2.5-0.5B-Instruct
+    server_path: str
+    framework: ModelFramework = ModelFramework.huggingface
+    description: str | None = None
+
+
+@router.post("/import-local", response_model=ModelPublic)
+async def import_local_model(
+    session: SessionDep,
+    current_user: CurrentUser,
+    body: ImportLocalModelRequest,
+) -> Any:
+    """
+    Import a HF-format model directory that is already present on the server.
+
+    The host directory is mounted read-only into the container (see
+    ``LOCAL_MODEL_DIRS`` / ``compose.cpu.yml``). The platform copies it into
+    its own storage and registers a ready ``Model`` row with
+    ``source_type=local`` so methods such as ``llm_quantize`` (engine=nncf)
+    can run on it directly.
+    """
+    allowed = [Path(p.strip()) for p in settings.LOCAL_MODEL_DIRS.split(";") if p.strip()]
+    if not allowed:
+        raise HTTPException(status_code=422, detail="LOCAL_MODEL_DIRS is empty")
+    raw = Path(body.server_path).expanduser().resolve()
+    if not any(raw.is_relative_to(root.resolve()) for root in allowed):
+        roots = ", ".join(str(r) for r in allowed)
+        raise HTTPException(
+            status_code=422,
+            detail=f"server_path must be inside one of: {roots}",
+        )
+    if not raw.is_dir():
+        raise HTTPException(status_code=404, detail="server_path is not a directory")
+
+    # Auto-descend one level when the repo root wraps a single HF directory.
+    source = raw
+    if not (source / "config.json").is_file():
+        children = [p for p in source.iterdir() if p.is_dir()]
+        hf_dirs = [p for p in children if (p / "config.json").is_file()]
+        if len(hf_dirs) == 1:
+            source = hf_dirs[0]
+    if not (source / "config.json").is_file():
+        raise HTTPException(
+            status_code=422, detail="Not a HuggingFace model dir: config.json missing"
+        )
+    weights = [
+        (source / "model.safetensors").is_file(),
+        (source / "pytorch_model.bin").is_file(),
+        (source / "model.bin").is_file(),
+    ]
+    if not any(weights):
+        raise HTTPException(
+            status_code=422,
+            detail="No weights found (model.safetensors / pytorch_model.bin / model.bin)",
+        )
+
+    try:
+        enforce_user_quota(session, current_user.id, dir_size(source))
+    except ValueError as exc:
+        raise HTTPException(status_code=413, detail=str(exc)) from exc
+
+    default_name = source.name or "local-model"
+    model = Model(
+        name=body.name or default_name,
+        framework=body.framework.value,
+        description=body.description,
+        source_type=ModelSourceType.local.value,
+        source_url=None,
+        status=ModelStatus.ready.value,
+        owner_id=current_user.id,
+    )
+    existing = session.exec(
+        select(Model)
+        .where(Model.name == model.name, Model.owner_id == current_user.id)
+        .order_by(col(Model.version).desc())
+        .limit(1)
+    ).first()
+    if existing:
+        model.version = existing.version + 1
+    session.add(model)
+    session.commit()
+    session.refresh(model)
+
+    dest = model_dir(model.id)
+    try:
+        shutil.copytree(source, dest, dirs_exist_ok=True)
+        model.file_path = str(dest)
+        model.size_bytes = dir_size(dest)
+        model.status = ModelStatus.ready.value
+        session.add(model)
+        session.commit()
+        session.refresh(model)
+    except Exception:
+        shutil.rmtree(dest, ignore_errors=True)
+        session.delete(model)
+        session.commit()
+        raise
+    return model
+
+
+def _local_model_roots() -> list[Path]:
+    return [
+        Path(p.strip()).resolve()
+        for p in settings.LOCAL_MODEL_DIRS.split(";")
+        if p.strip()
+    ]
+
+
+@router.get("/local-dirs")
+async def list_local_model_dirs() -> dict[str, Any]:
+    """List candidate HF model directories under the read-only local roots.
+
+    Lets the “import local model” dialog offer choices (each one-level child
+    directory of a configured root) while still allowing a free-form path.
+    """
+    roots = _local_model_roots()
+    dirs: list[dict[str, Any]] = []
+    for root in roots:
+        if not root.is_dir():
+            continue
+        for child in sorted(root.iterdir()):
+            if not child.is_dir():
+                continue
+            dirs.append(
+                {
+                    "name": child.name,
+                    "path": str(child),
+                    "has_config": (child / "config.json").is_file(),
+                    "weight_files": sum(
+                        1
+                        for name in ("model.safetensors", "pytorch_model.bin", "model.bin")
+                        if (child / name).is_file()
+                    ),
+                }
+            )
+    return {"roots": [str(r) for r in roots], "dirs": dirs}
 
 
 @router.get("/{model_id}", response_model=ModelPublic)

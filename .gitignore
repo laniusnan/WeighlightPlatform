@@ -29,3 +29,6 @@ ui-preview/
 dist/
 *.tgz
 .DS_Store
+
+.venv311*
+.env.gpu

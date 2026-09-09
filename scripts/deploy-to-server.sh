@@ -46,6 +46,7 @@ EXCLUDES=(
   --exclude=test-results
   --exclude=cpu-build.log
   --exclude=.env
+  --exclude=.env.cpu
   --exclude='*.log'
 )
 
@@ -53,7 +54,7 @@ EXCLUDES=(
 say "1/5 同步代码  ->  ${HOST}:${REMOTE_DIR}"
 ssh -o BatchMode=yes "$HOST" "mkdir -p '$REMOTE_DIR'" \
   || die "无法 SSH 到 $HOST（请先配置免密：ssh-copy-id $HOST）"
-rsync -az "${EXCLUDES[@]}" "$ROOT_DIR/" "$HOST:$REMOTE_DIR/"
+rsync -az --delete "${EXCLUDES[@]}" "$ROOT_DIR/" "$HOST:$REMOTE_DIR/"
 
 # 2/5 检查远端 .env.cpu
 say "2/5 检查远端环境变量 .env.cpu"

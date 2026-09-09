@@ -9,15 +9,23 @@
 // Additionally, you should also exclude this file from your linter and/or formatter to prevent it from being checked or modified.
 
 import { Route as rootRouteImport } from './routes/__root'
+import { Route as IndexRouteImport } from './routes/index'
 import { Route as LabRouteImport } from './routes/lab'
 import { Route as LabCompressionsRouteImport } from './routes/lab/compressions'
 import { Route as LabDashboardRouteImport } from './routes/lab/dashboard'
+import { Route as LabDocsRouteImport } from './routes/lab/docs'
 import { Route as LabEvaluateRouteImport } from './routes/lab/evaluate'
 import { Route as LabExportRouteImport } from './routes/lab/export'
 import { Route as LabLoginRouteImport } from './routes/lab/login'
 import { Route as LabModelsRouteImport } from './routes/lab/models'
+import { Route as LabSelfcheckRouteImport } from './routes/lab/selfcheck'
 import { Route as LabSignupRouteImport } from './routes/lab/signup'
 
+const IndexRoute = IndexRouteImport.update({
+  id: '/',
+  path: '/',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const LabRoute = LabRouteImport.update({
   id: '/lab',
   path: '/lab',
@@ -31,6 +39,11 @@ const LabCompressionsRoute = LabCompressionsRouteImport.update({
 const LabDashboardRoute = LabDashboardRouteImport.update({
   id: '/dashboard',
   path: '/dashboard',
+  getParentRoute: () => LabRoute,
+} as any)
+const LabDocsRoute = LabDocsRouteImport.update({
+  id: '/docs',
+  path: '/docs',
   getParentRoute: () => LabRoute,
 } as any)
 const LabEvaluateRoute = LabEvaluateRouteImport.update({
@@ -53,6 +66,11 @@ const LabModelsRoute = LabModelsRouteImport.update({
   path: '/models',
   getParentRoute: () => LabRoute,
 } as any)
+const LabSelfcheckRoute = LabSelfcheckRouteImport.update({
+  id: '/selfcheck',
+  path: '/selfcheck',
+  getParentRoute: () => LabRoute,
+} as any)
 const LabSignupRoute = LabSignupRouteImport.update({
   id: '/signup',
   path: '/signup',
@@ -60,75 +78,101 @@ const LabSignupRoute = LabSignupRouteImport.update({
 } as any)
 
 export interface FileRoutesByFullPath {
+  '/': typeof IndexRoute
   '/lab': typeof LabRouteWithChildren
   '/lab/compressions': typeof LabCompressionsRoute
   '/lab/dashboard': typeof LabDashboardRoute
+  '/lab/docs': typeof LabDocsRoute
   '/lab/evaluate': typeof LabEvaluateRoute
   '/lab/export': typeof LabExportRoute
   '/lab/login': typeof LabLoginRoute
   '/lab/models': typeof LabModelsRoute
+  '/lab/selfcheck': typeof LabSelfcheckRoute
   '/lab/signup': typeof LabSignupRoute
 }
 export interface FileRoutesByTo {
+  '/': typeof IndexRoute
   '/lab': typeof LabRouteWithChildren
   '/lab/compressions': typeof LabCompressionsRoute
   '/lab/dashboard': typeof LabDashboardRoute
+  '/lab/docs': typeof LabDocsRoute
   '/lab/evaluate': typeof LabEvaluateRoute
   '/lab/export': typeof LabExportRoute
   '/lab/login': typeof LabLoginRoute
   '/lab/models': typeof LabModelsRoute
+  '/lab/selfcheck': typeof LabSelfcheckRoute
   '/lab/signup': typeof LabSignupRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
+  '/': typeof IndexRoute
   '/lab': typeof LabRouteWithChildren
   '/lab/compressions': typeof LabCompressionsRoute
   '/lab/dashboard': typeof LabDashboardRoute
+  '/lab/docs': typeof LabDocsRoute
   '/lab/evaluate': typeof LabEvaluateRoute
   '/lab/export': typeof LabExportRoute
   '/lab/login': typeof LabLoginRoute
   '/lab/models': typeof LabModelsRoute
+  '/lab/selfcheck': typeof LabSelfcheckRoute
   '/lab/signup': typeof LabSignupRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
   fullPaths:
+    | '/'
     | '/lab'
     | '/lab/compressions'
     | '/lab/dashboard'
+    | '/lab/docs'
     | '/lab/evaluate'
     | '/lab/export'
     | '/lab/login'
     | '/lab/models'
+    | '/lab/selfcheck'
     | '/lab/signup'
   fileRoutesByTo: FileRoutesByTo
   to:
+    | '/'
     | '/lab'
     | '/lab/compressions'
     | '/lab/dashboard'
+    | '/lab/docs'
     | '/lab/evaluate'
     | '/lab/export'
     | '/lab/login'
     | '/lab/models'
+    | '/lab/selfcheck'
     | '/lab/signup'
   id:
     | '__root__'
+    | '/'
     | '/lab'
     | '/lab/compressions'
     | '/lab/dashboard'
+    | '/lab/docs'
     | '/lab/evaluate'
     | '/lab/export'
     | '/lab/login'
     | '/lab/models'
+    | '/lab/selfcheck'
     | '/lab/signup'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
+  IndexRoute: typeof IndexRoute
   LabRoute: typeof LabRouteWithChildren
 }
 
 declare module '@tanstack/react-router' {
   interface FileRoutesByPath {
+    '/': {
+      id: '/'
+      path: '/'
+      fullPath: '/'
+      preLoaderRoute: typeof IndexRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/lab': {
       id: '/lab'
       path: '/lab'
@@ -148,6 +192,13 @@ declare module '@tanstack/react-router' {
       path: '/dashboard'
       fullPath: '/lab/dashboard'
       preLoaderRoute: typeof LabDashboardRouteImport
+      parentRoute: typeof LabRoute
+    }
+    '/lab/docs': {
+      id: '/lab/docs'
+      path: '/docs'
+      fullPath: '/lab/docs'
+      preLoaderRoute: typeof LabDocsRouteImport
       parentRoute: typeof LabRoute
     }
     '/lab/evaluate': {
@@ -178,6 +229,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof LabModelsRouteImport
       parentRoute: typeof LabRoute
     }
+    '/lab/selfcheck': {
+      id: '/lab/selfcheck'
+      path: '/selfcheck'
+      fullPath: '/lab/selfcheck'
+      preLoaderRoute: typeof LabSelfcheckRouteImport
+      parentRoute: typeof LabRoute
+    }
     '/lab/signup': {
       id: '/lab/signup'
       path: '/signup'
@@ -191,26 +249,31 @@ declare module '@tanstack/react-router' {
 interface LabRouteChildren {
   LabCompressionsRoute: typeof LabCompressionsRoute
   LabDashboardRoute: typeof LabDashboardRoute
+  LabDocsRoute: typeof LabDocsRoute
   LabEvaluateRoute: typeof LabEvaluateRoute
   LabExportRoute: typeof LabExportRoute
   LabLoginRoute: typeof LabLoginRoute
   LabModelsRoute: typeof LabModelsRoute
+  LabSelfcheckRoute: typeof LabSelfcheckRoute
   LabSignupRoute: typeof LabSignupRoute
 }
 
 const LabRouteChildren: LabRouteChildren = {
   LabCompressionsRoute: LabCompressionsRoute,
   LabDashboardRoute: LabDashboardRoute,
+  LabDocsRoute: LabDocsRoute,
   LabEvaluateRoute: LabEvaluateRoute,
   LabExportRoute: LabExportRoute,
   LabLoginRoute: LabLoginRoute,
   LabModelsRoute: LabModelsRoute,
+  LabSelfcheckRoute: LabSelfcheckRoute,
   LabSignupRoute: LabSignupRoute,
 }
 
 const LabRouteWithChildren = LabRoute._addFileChildren(LabRouteChildren)
 
 const rootRouteChildren: RootRouteChildren = {
+  IndexRoute: IndexRoute,
   LabRoute: LabRouteWithChildren,
 }
 export const routeTree = rootRouteImport

@@ -1,13 +1,38 @@
 from typing import Any
 
 from fastapi import APIRouter, Depends, Response
+from pydantic import BaseModel
 from pydantic.networks import EmailStr
 
-from app.api.deps import SessionDep, get_current_active_superuser
+from app.api.deps import CurrentUser, SessionDep, get_current_active_superuser
 from app.models import Message
 from app.utils import generate_test_email, send_email
 
 router = APIRouter(prefix="/utils", tags=["utils"])
+
+
+class SelfCheckRunRequest(BaseModel):
+    check: str
+
+
+@router.post("/selfcheck/run")
+async def selfcheck_run(body: SelfCheckRunRequest, current_user: CurrentUser) -> dict[str, Any]:
+    """One-click self-checks: fitnets_distill / distill_logits / prune_l1."""
+    import asyncio
+
+    from app.jobs.selfcheck import run_selfcheck
+
+    return await asyncio.to_thread(run_selfcheck, body.check)
+
+
+@router.post("/selfcheck/fitnets")
+async def selfcheck_fitnets(current_user: CurrentUser) -> dict[str, Any]:
+    """Backwards-compatible alias for fitnets_distill."""
+    import asyncio
+
+    from app.jobs.selfcheck import run_fitnets_smoke
+
+    return await asyncio.to_thread(run_fitnets_smoke)
 
 
 @router.post(

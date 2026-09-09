@@ -94,6 +94,23 @@ def predict(
     import time
 
     path = _resolve_artifact(session, current_user, body.task_id, body.model_id)
+    from app.core.config import settings
+
+    if str(settings.COMPUTE_BACKEND).strip().lower() == "gpu":
+        try:
+            from app.services import get_service_bundle
+
+            out = get_service_bundle("gpu").inference.run_predict(
+                path, body.inputs, input_shape=body.input_shape
+            )
+        except Exception as exc:
+            raise HTTPException(status_code=422, detail=f"GPU inference failed: {exc}") from exc
+        out_arr = np.asarray(out)
+        return PredictResponse(
+            output_shape=list(out_arr.shape),
+            output=out_arr.tolist(),
+            latency_ms=round(0.0, 3),
+        )
     try:
         runner = _make_runner(path)
     except Exception as exc:
@@ -141,11 +158,32 @@ class ChatRequest(BaseModel):
     messages: list[ChatMessage]
     max_new_tokens: int = 64
     temperature: float = 0.7
+    top_p: float = 1.0
+    min_p: float = 0.0
     stream: bool = False
 
 
 def _load_chat_model(artifact: Path) -> tuple[Any, Any]:
-    """Load the OpenVINO IR LLM + tokenizer for a chat session."""
+    """Load the OpenVINO IR LLM + tokenizer for a chat session.
+
+    Two artifact flavours are supported:
+    * ``engine=nncf`` single-forward IR (no KV cache) -> ``NncfChatModel``
+      naive generator (``model.xml`` + ``engine_nncf.txt`` marker);
+    * optimum-intel exported IR -> ``OVModelForCausalLM``.
+    """
+    pure_nncf = (
+        (artifact / "engine_nncf.txt").exists()
+        or (
+            (artifact / "model.xml").exists()
+            and not (artifact / "openvino_model.xml").exists()
+            and not (artifact / "openvino_config.json").exists()
+        )
+    )
+    if pure_nncf:
+        from app.jobs.llm_runtime_nncf import NncfChatModel
+
+        model = NncfChatModel(str(artifact), device="CPU")
+        return model, model.tokenizer
     from optimum.intel import OVModelForCausalLM
     from transformers import AutoTokenizer
 
@@ -184,6 +222,60 @@ async def chat_completions(
         raise HTTPException(status_code=422, detail="Task has no usable output")
     artifact = Path(task.output_path)
 
+    from app.core.config import settings
+
+    if str(settings.COMPUTE_BACKEND).strip().lower() == "gpu":
+        if body.stream:
+            raise HTTPException(
+                status_code=501,
+                detail="GPU backend: SSE streaming not implemented yet - set stream=false",
+            )
+        try:
+            from transformers import AutoTokenizer
+
+            from app.services import get_service_bundle
+
+            gpu_tok = AutoTokenizer.from_pretrained(str(artifact))
+            rendered = gpu_tok.apply_chat_template(
+                [m.model_dump() for m in body.messages],
+                tokenize=False,
+                add_generation_prompt=True,
+            )
+            result = get_service_bundle("gpu").inference.chat_completion(
+                artifact,
+                rendered,
+                already_formatted=True,
+                max_new_tokens=max(body.max_new_tokens, 1),
+                temperature=body.temperature,
+                top_p=body.top_p,
+                min_p=body.min_p,
+            )
+            return {
+                "id": f"chatcmpl-{task.id}",
+                "object": "chat.completion",
+                "created": int(__import__("time").time()),
+                "model": task.model.name if task.model else str(task.model_id),
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {"role": "assistant", "content": result["text"]},
+                        "finish_reason": "stop",
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": int(result.get("prompt_tokens", 0)),
+                    "completion_tokens": int(result.get("completion_tokens", 0)),
+                    "total_tokens": int(result.get("total_tokens", 0)),
+                },
+                "latency_ms": round(float(result.get("latency_ms", 0.0)), 3),
+            }
+        except HTTPException:
+            raise
+        except Exception as exc:
+            raise HTTPException(
+                status_code=422, detail=f"GPU chat inference failed: {exc}"
+            ) from exc
+
     try:
         model, tokenizer = _load_chat_model(artifact)
         prompt = tokenizer.apply_chat_template(
@@ -201,35 +293,57 @@ async def chat_completions(
         "max_new_tokens": max(body.max_new_tokens, 1),
         "do_sample": body.temperature > 0,
         "temperature": body.temperature,
+        "top_p": max(min(body.top_p, 1.0), 0.0),
+        "min_p": max(min(body.min_p, 1.0), 0.0),
     }
 
     if body.stream:
         from fastapi.responses import StreamingResponse
-        from transformers import StoppingCriteria, TextIteratorStreamer
 
         stop_event = threading.Event()
+        if getattr(model, "naive", False):
+            # engine=nncf single-forward IR (no KV cache): the naive generator
+            # streams one decoded text piece per token; no TextIteratorStreamer.
+            text_queue: _queue.Queue[str | None] = _queue.Queue()
 
-        class _StopOnDisconnect(StoppingCriteria):
-            def __call__(
-                self,
-                input_ids: Any,
-                scores: Any,
-                **kwargs: Any,
-            ) -> bool:
-                return stop_event.is_set()
+            def _naive_run() -> None:
+                try:
+                    for piece in model.generate_text_stream(
+                        input_ids=inputs["input_ids"],
+                        attention_mask=inputs.get("attention_mask"),
+                        stop_event=stop_event,
+                        **gen_kwargs,
+                    ):
+                        text_queue.put(piece)
+                finally:
+                    text_queue.put(None)
 
-        streamer = TextIteratorStreamer(
-            tokenizer, skip_prompt=True, skip_special_tokens=True
-        )
-        thread = threading.Thread(
-            target=lambda: model.generate(
-                **inputs,
-                streamer=streamer,
-                stopping_criteria=[_StopOnDisconnect()],
-                **gen_kwargs,
-            ),
-            daemon=True,
-        )
+            thread = threading.Thread(target=_naive_run, daemon=True)
+        else:
+            from transformers import StoppingCriteria, TextIteratorStreamer
+
+            class _StopOnDisconnect(StoppingCriteria):
+                def __call__(
+                    self,
+                    input_ids: Any,
+                    scores: Any,
+                    **kwargs: Any,
+                ) -> bool:
+                    return stop_event.is_set()
+
+            streamer = TextIteratorStreamer(
+                tokenizer, skip_prompt=True, skip_special_tokens=True
+            )
+            text_queue = streamer.text_queue
+            thread = threading.Thread(
+                target=lambda: model.generate(
+                    **inputs,
+                    streamer=streamer,
+                    stopping_criteria=[_StopOnDisconnect()],
+                    **gen_kwargs,
+                ),
+                daemon=True,
+            )
         thread.start()
         created = int(time.time())
         completion_id = f"chatcmpl-{task.id}"
@@ -240,7 +354,7 @@ async def chat_completions(
                     "id": completion_id,
                     "object": "chat.completion.chunk",
                     "created": created,
-                    "model": task.model_name,
+                    "model": task.model.name if task.model else str(task.model_id),
                     "choices": [
                         {
                             "index": 0,
@@ -259,7 +373,7 @@ async def chat_completions(
                         stop_event.set()
                         break
                     try:
-                        text = streamer.text_queue.get(timeout=0.5)
+                        text = text_queue.get(timeout=0.5)
                     except _queue.Empty:
                         if not thread.is_alive():
                             break
@@ -292,7 +406,7 @@ async def chat_completions(
         "id": f"chatcmpl-{task.id}",
         "object": "chat.completion",
         "created": int(time.time()),
-        "model": task.model_name,
+        "model": task.model.name if task.model else str(task.model_id),
         "choices": [
             {
                 "index": 0,

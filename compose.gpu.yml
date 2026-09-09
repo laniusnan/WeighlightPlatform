@@ -1,0 +1,128 @@
+# AI Model Lightweight Platform - LOCAL GPU compose (separate from CPU server)
+# ---------------------------------------------------------------------------
+# 用途：本机 RTX 4060 本地 GPU 版。API/worker 使用同一 backend 镜像（pypi torch
+# 自带 CUDA 运行库，CPU 主机上退化为 CPU 执行），仅在 worker 显式分配 1 块 GPU。
+# 与 CPU-only 服务器完全隔离：top-level `name` 不同，端口改用 8002。
+# 用法（需 docker compose v2 + nvidia-container-toolkit）：
+#   cp .env.gpu.example .env.gpu
+#   docker compose -f compose.gpu.yml --env-file .env.gpu up -d --build
+#   open http://localhost:8002
+# HF 大模型缓存经 HF_CACHE_HOST 挂载，服务器/本地下载一次可复用。
+
+name: mlplatform-gpu-local
+
+services:
+  db:
+    image: postgres:18
+    restart: unless-stopped
+    environment:
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD 未设置}
+      POSTGRES_DB: app
+    volumes:
+      - app-db-data:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d app"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  backend:
+    image: backend-gpu:latest
+    restart: unless-stopped
+    build:
+      context: .
+      dockerfile: backend/Dockerfile.cpu
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      PROJECT_NAME: ${PROJECT_NAME:?PROJECT_NAME 未设置}
+      SECRET_KEY: ${SECRET_KEY:?SECRET_KEY 未设置}
+      FIRST_SUPERUSER: ${FIRST_SUPERUSER:?FIRST_SUPERUSER 未设置}
+      FIRST_SUPERUSER_PASSWORD: ${FIRST_SUPERUSER_PASSWORD:?FIRST_SUPERUSER_PASSWORD 未设置}
+      FASTAPI_ENV: ${FASTAPI_ENV:-}
+      DATABASE_URL: postgresql://postgres:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD 未设置}@db:5432/app
+      REDIS_URL: redis://redis:6379/0
+      FRONTEND_HOST: ${FRONTEND_HOST:-http://localhost:8002}
+      MODEL_STORAGE_PATH: /app/backend/models-storage
+      LOCAL_MODEL_DIRS: /models-local
+      MAX_MODEL_DOWNLOAD_BYTES: ${MAX_MODEL_DOWNLOAD_BYTES:-10737418240}
+      USER_STORAGE_QUOTA_BYTES: ${USER_STORAGE_QUOTA_BYTES:-53687091200}
+    command:
+      - sh
+      - -c
+      - "./scripts/prestart.sh && exec fastapi run --host 0.0.0.0 --port 8000 --workers ${WEB_CONCURRENCY:-2}"
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/api/v1/utils/health-check/', timeout=5).status==200 else 1)"
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 40s
+    volumes:
+      - models-data:/app/backend/models-storage
+      - ${HF_CACHE_HOST:-/home/lanius/.cache/huggingface}:/root/.cache/huggingface
+    ports:
+      - "8002:8000"
+
+  worker:
+    image: backend-gpu:latest
+    restart: unless-stopped
+    build:
+      context: .
+      dockerfile: backend/Dockerfile.cpu
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      backend:
+        condition: service_healthy
+    environment:
+      PROJECT_NAME: ${PROJECT_NAME:?PROJECT_NAME 未设置}
+      SECRET_KEY: ${SECRET_KEY:?SECRET_KEY 未设置}
+      FIRST_SUPERUSER: ${FIRST_SUPERUSER:?FIRST_SUPERUSER 未设置}
+      FIRST_SUPERUSER_PASSWORD: ${FIRST_SUPERUSER_PASSWORD:?FIRST_SUPERUSER_PASSWORD 未设置}
+      FASTAPI_ENV: ${FASTAPI_ENV:-}
+      DATABASE_URL: postgresql://postgres:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD 未设置}@db:5432/app
+      REDIS_URL: redis://redis:6379/0
+      MODEL_STORAGE_PATH: /app/backend/models-storage
+      LOCAL_MODEL_DIRS: /models-local
+      MAX_MODEL_DOWNLOAD_BYTES: ${MAX_MODEL_DOWNLOAD_BYTES:-10737418240}
+      USER_STORAGE_QUOTA_BYTES: ${USER_STORAGE_QUOTA_BYTES:-53687091200}
+      WORKER_MAX_JOBS: ${WORKER_MAX_JOBS:-1}
+    command: ["arq", "app.worker.WorkerSettings"]
+    shm_size: 2gb
+    volumes:
+      - models-data:/app/backend/models-storage
+      - ${HF_CACHE_HOST:-/home/lanius/.cache/huggingface}:/root/.cache/huggingface
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+volumes:
+  app-db-data:
+  redis-data:
+  models-data:

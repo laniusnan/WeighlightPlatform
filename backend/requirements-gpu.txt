@@ -1,0 +1,26 @@
+# -----------------------------------------------------------------------------
+# OPTIONAL GPU dependencies (future NVIDIA GPU server)
+#
+# These are NOT installed by the default CPU build. Use with the same
+# transformers/optimum pins from backend/pyproject.toml.
+#
+# Example (CUDA 12.6, torch 2.9.1 matching the verified CPU pair):
+#   uv pip install --python .venv-gpu/bin/python \
+#     --index-url https://download.pytorch.org/whl/cu126 \
+#     torch==2.9.1 torchvision==0.24.1
+#
+# -----------------------------------------------------------------------------
+# -- PyTorch CUDA -------------------------------------------------------------
+# torch==2.9.1                     # cu126 wheels (index above)
+# torchvision==0.24.1
+# -- OpenVINO GPU plugin (comes with openvino package) ------------------------
+# openvino>=2025,<2027             # device_name="GPU" at runtime
+# -- ONNX Runtime GPU / TensorRT -------------------------------------------------
+# onnxruntime-gpu>=1.20,<2.0       # CUDAExecutionProvider
+# tensorrt>=10,<11                 # optional TensorRT EP
+# -- Triton / monitoring (optional) ----------------------------------------------
+# nvitop
+# pynvml
+# -----------------------------------------------------------------------------
+# NOTE: GPU service implementations are skeletons (backend/app/services/*_gpu.py).
+# Keep COMPUTE_BACKEND=cpu until the target method is enabled for GPU.

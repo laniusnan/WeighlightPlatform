@@ -24,6 +24,9 @@ class ModelFramework(enum.StrEnum):
 class ModelSourceType(enum.StrEnum):
     upload = "upload"
     url = "url"
+    # Imported from a directory on the server host (mounted read-only into the
+    # container, e.g. /home/zhangxuefei/Model -> /models-local).
+    local = "local"
 
 
 class ModelStatus(enum.StrEnum):
@@ -38,9 +41,11 @@ class CompressionMethod(enum.StrEnum):
     quantize_onnx = "quantize_onnx"  # ONNX dynamic INT8 quantization
     quantize_onnx_static = "quantize_onnx_static"  # ONNX static INT8 (with calibration data)
     openvino_int8 = "openvino_int8"  # OpenVINO IR + NNCF INT8 post-training quantization
-    prune = "prune"  # L2-norm structured filter pruning (PyTorch CNN)
-    sparsify = "sparsify"  # Unstructured magnitude pruning (zero out smallest weights)
-    qat = "qat"  # Quantization-aware fine-tuning (PyTorch FX) -> quantized ONNX
+    prune = "prune"  # L1/L2/BN-Slim structured filter pruning (PyTorch CNN)
+    sparsify = "sparsify"  # Unstructured magnitude pruning (uniform / global threshold)
+    distill = "distill"  # Knowledge distillation (teacher -> width_mult student, per-class images)
+    qat = "qat"  # Quantization-aware fine-tuning (PyTorch FX / LSQ) -> quantized ONNX
+    llm_finetune = "llm_finetune"  # CPU micro LoRA SFT prototype (GPU phase II: XTuner)
     export_gguf = "export_gguf"  # HuggingFace LLM -> GGUF (llama.cpp) for llama.cpp tools
     llm_quantize = "llm_quantize"  # LLM INT4/INT8 via optimum-intel (OpenVINO IR)
 
@@ -99,10 +104,10 @@ class User(UserBase, table=True):
         default_factory=get_datetime_utc,
         sa_type=DateTime(timezone=True),  # type: ignore
     )
-    items: list[Item] = Relationship(back_populates="owner", cascade_delete=True)
-    models: list[Model] = Relationship(back_populates="owner", cascade_delete=True)
-    datasets: list[Dataset] = Relationship(back_populates="owner", cascade_delete=True)
-    compression_tasks: list[CompressionTask] = Relationship(
+    items: list["Item"] = Relationship(back_populates="owner", cascade_delete=True)
+    models: list["Model"] = Relationship(back_populates="owner", cascade_delete=True)
+    datasets: list["Dataset"] = Relationship(back_populates="owner", cascade_delete=True)
+    compression_tasks: list["CompressionTask"] = Relationship(
         back_populates="owner", cascade_delete=True
     )
 
@@ -215,7 +220,7 @@ class Model(ModelBase, table=True):
         foreign_key="user.id", nullable=False, ondelete="CASCADE"
     )
     owner: User | None = Relationship(back_populates="models")
-    compression_tasks: list[CompressionTask] = Relationship(
+    compression_tasks: list["CompressionTask"] = Relationship(
         back_populates="model", cascade_delete=True
     )
 
