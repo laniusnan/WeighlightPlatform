@@ -236,3 +236,9 @@ docker run --rm -v full-stack-fastapi_models-data:/data -v "$PWD":/backup alpine
 本方案直连 IP 明文 HTTP。对外生产建议域名 + Traefik（模板自带）：
 `docker-compose -f compose.yml -f compose.deploy.yml up -d --build`，
 见 [`deployment-docker-compose.md`](deployment-docker-compose.md)。
+
+### GGUF q4_K_M / 旧式量化（可选）
+`export_gguf` 的 outtype 若填 q4_0 / q4_K_M / iq4_xs 等：平台会先转 f16，再用
+`llama-quantize` 二次量化。需要服务器安装 llama.cpp 的 llama-quantize，并把
+所在目录通过 `LLAMA_CPP_PATH` 注入后端容器（或放入 llama.cpp 工具缓存目录）。
+未安装时任务会给出明确的安装指引错误。

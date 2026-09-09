@@ -72,6 +72,7 @@ services:
       REDIS_URL: redis://redis:6379/0
       FRONTEND_HOST: ${FRONTEND_HOST:-http://localhost:8001}
       MODEL_STORAGE_PATH: /app/backend/models-storage
+      LOCAL_MODEL_DIRS: /models-local
       MAX_MODEL_DOWNLOAD_BYTES: ${MAX_MODEL_DOWNLOAD_BYTES:-10737418240}
       USER_STORAGE_QUOTA_BYTES: ${USER_STORAGE_QUOTA_BYTES:-53687091200}
       SMTP_HOST: ${SMTP_HOST:-}
@@ -98,6 +99,9 @@ services:
       start_period: 40s
     volumes:
       - models-data:/app/backend/models-storage
+      # Server-local HF model directories (read-only) for the "import local"
+      # feature: platform copies from here into its own storage.
+      - ${LOCAL_MODEL_DIRS_HOST:-/home/zhangxuefei/Model}:/models-local:ro
     ports:
       - "8001:8000"
 
@@ -123,12 +127,16 @@ services:
       DATABASE_URL: postgresql://postgres:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD 未设置}@db:5432/app
       REDIS_URL: redis://redis:6379/0
       MODEL_STORAGE_PATH: /app/backend/models-storage
+      LOCAL_MODEL_DIRS: /models-local
       MAX_MODEL_DOWNLOAD_BYTES: ${MAX_MODEL_DOWNLOAD_BYTES:-10737418240}
       USER_STORAGE_QUOTA_BYTES: ${USER_STORAGE_QUOTA_BYTES:-53687091200}
       WORKER_MAX_JOBS: ${WORKER_MAX_JOBS:-1}
     command: ["arq", "app.worker.WorkerSettings"]
     volumes:
       - models-data:/app/backend/models-storage
+      # Server-local HF model directories (read-only) for the "import local"
+      # feature (worker sees the same layout as the API).
+      - ${LOCAL_MODEL_DIRS_HOST:-/home/zhangxuefei/Model}:/models-local:ro
 
 volumes:
   app-db-data:

@@ -12,6 +12,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+import torch  # eager import: module-level LSQ autograd classes require it
+
 from sqlmodel import Session
 
 from app.core.db import engine
@@ -176,8 +178,12 @@ def _dispatch(
         return export_gguf(model, params, out_dir, progress)
     if method == CompressionMethod.prune.value:
         return prune(model, params, out_dir, progress)
+    if method == CompressionMethod.distill.value:
+        return distill(model, params, out_dir, progress)
     if method == CompressionMethod.llm_quantize.value:
         return llm_quantize(model, params, out_dir, progress)
+    if method == CompressionMethod.llm_finetune.value:
+        return llm_finetune(model, params, out_dir, progress)
     raise ValueError(f"Unknown compression method: {method}")
 
 
@@ -708,7 +714,9 @@ def _nncf_quantize_ov(
 
 
 # ---------------------------------------------------------------------------
-# prune: L2-norm structured filter pruning (PyTorch CNNs)
+# prune: L1/L2/BN-Slim structured filter pruning (PyTorch CNNs)
+#   algorithm = "l1" | "l2" (default l2, weight norms)
+#             | "bnslim" (uses |BN gamma| as channel importance)
 # ---------------------------------------------------------------------------
 def prune(
     model: Model,
@@ -733,14 +741,152 @@ def prune(
     if not conv_layers:
         raise ValueError("No Conv2d layers found, pruning is not applicable")
 
+    algorithm = str(params.get("algorithm", "l2")).strip().lower()
+    if algorithm not in {"l1", "l2", "bnslim", "group_fisher", "autoslim", "dmcp"}:
+        raise ValueError(
+            "prune algorithm must be one of: l1, l2, bnslim, group_fisher, autoslim, dmcp"
+        )
+
+    fisher_scores: list[Any] | None = None
+    autoslim_gamma: list[Any] | None = None
+    dmcp_scores: list[Any] | None = None
+    data_driven = algorithm in {"group_fisher", "autoslim", "dmcp"}
+    if data_driven:
+        if not (params.get("dataset_id") or params.get("data_url") or params.get("data_dir")):
+            raise ValueError(
+                f"prune algorithm={algorithm} requires a dataset "
+                "(dataset_id/data_url or per-class image folder)"
+            )
+        progress(24, f"Preparing data for algorithm={algorithm}...")
+        data_path = _resolve_eval_data(
+            {"type": "classification", "dataset_id": params.get("dataset_id"),
+             "data_url": params.get("data_url"), "data_dir": params.get("data_dir")},
+            out_dir / "prune_data",
+        )
+        class_dirs = sorted(x for x in data_path.iterdir() if x.is_dir())
+        if not class_dirs:
+            raise ValueError(f"{algorithm} needs per-class image folders")
+        height = int(params.get("fisher_image_size", 224))
+        imgs: list[Any] = []
+        labels: list[int] = []
+        for label, cd in enumerate(class_dirs):
+            for f in sorted(cd.iterdir()):
+                if f.suffix.lower() in {".jpg", ".jpeg", ".png", ".bmp"}:
+                    imgs.append(torch.from_numpy(_preprocess_image(f, height, height)[0].copy()))
+                    labels.append(label)
+                    if len(imgs) >= 96:
+                        break
+        if not imgs:
+            raise ValueError(f"No images found for {algorithm}")
+        X = torch.stack(imgs)
+        y = torch.tensor(labels, dtype=torch.long)
+        iters = max(int(params.get("fisher_iters", 12)), 1)
+        bs = max(int(params.get("fisher_batch_size", 8)), 1)
+
+        if algorithm == "autoslim":
+            # AutoSlim-style sparse training: minimise CE + l1 * mean|BN gamma|
+            # so channels with small gamma become cheap to remove afterwards.
+            import torch.nn.functional as _Ff
+
+            net.train()
+            l1_reg = float(params.get("autoslim_l1", 1e-2))
+            epochs_a = max(int(params.get("autoslim_epochs", 2)), 1)
+            optim_a = torch.optim.SGD(net.parameters(), lr=float(params.get("autoslim_lr", 3e-3)), momentum=0.9)
+            bn_mods = [m for m in net.modules() if isinstance(m, torch.nn.BatchNorm2d)]
+            for _e in range(epochs_a):
+                perm = torch.randperm(len(X))
+                for i in range(0, len(perm), bs):
+                    idx = perm[i : i + bs]
+                    optim_a.zero_grad()
+                    out = net(X[idx])
+                    if isinstance(out, (tuple, list)):
+                        out = out[0]
+                    loss = _Ff.cross_entropy(out, y[idx])
+                    if bn_mods:
+                        loss = loss + l1_reg * sum(m.weight.abs().mean() for m in bn_mods)
+                    loss.backward()
+                    optim_a.step()
+                progress(24 + int(20 * (_e + 1) / epochs_a), f"AutoSlim sparse train epoch {_e + 1}/{epochs_a}")
+            net.eval()
+        else:
+            # gradient-based probes over pseudo labels: Fisher (group_fisher)
+            # squares gradients; DMCP-style probes use |weight * grad| (first
+            # order Taylor) aggregated per output channel.
+            import torch.nn.functional as _Ff
+
+            fisher = [torch.zeros(c.out_channels, dtype=torch.float32) for c in conv_layers]
+            dmcp = [torch.zeros(c.out_channels, dtype=torch.float32) for c in conv_layers]
+            net.train()
+            for _ in range(iters):
+                perm = torch.randperm(len(X))
+                for i in range(0, len(perm), bs):
+                    idx = perm[i : i + bs]
+                    net.zero_grad()
+                    out = net(X[idx])
+                    if isinstance(out, (tuple, list)):
+                        out = out[0]
+                    pseudo = out.detach().argmax(dim=1)
+                    loss = _Ff.cross_entropy(out, pseudo)
+                    loss.backward()
+                    for ci, conv in enumerate(conv_layers):
+                        grad = conv.weight.grad
+                        if grad is not None:
+                            fisher[ci] += (grad * grad).mean(dim=(1, 2, 3)).detach()
+                            dmcp[ci] += (grad * conv.weight.data).abs().mean(dim=(1, 2, 3)).detach()
+            net.eval()
+            total_steps = max(len(imgs) // bs * iters, 1)
+            if algorithm == "group_fisher":
+                fisher_scores = [(f / total_steps).sqrt() for f in fisher]
+            else:
+                dmcp_scores = [(d / total_steps).sqrt() for d in dmcp]
+
+
     total_filters = sum(conv.out_channels for conv in conv_layers)
     pruned_filters = 0
     keep_lists: list[list[int]] = []
+    slim_fallback_layers = 0
+
+    # Pair each Conv2d with the BatchNorm that immediately follows it
+    # (in-order traversal) so BN-Slim and BN-trim never mismatch layers.
+    pair_bn: list[torch.nn.BatchNorm2d | None] = []
+    pending_conv: torch.nn.Conv2d | None = None
+    for module in net.modules():
+        if isinstance(module, torch.nn.Conv2d):
+            pair_bn.append(None)
+            pending_conv = module
+        elif isinstance(module, torch.nn.BatchNorm2d) and pending_conv is not None:
+            pair_bn[-1] = module
+            pending_conv = None
 
     for i, conv in enumerate(conv_layers):
-        norms = conv.weight.data.view(conv.out_channels, -1).norm(dim=1)
+        original_out = conv.out_channels
+        score: Any = None
+        if algorithm == "group_fisher" and fisher_scores is not None:
+            score = fisher_scores[i].clone()
+        elif algorithm == "dmcp" and dmcp_scores is not None:
+            score = dmcp_scores[i].clone()
+        elif algorithm == "autoslim":
+            # Importance = |BN gamma| right after sparse (L1) training.
+            bn = pair_bn[i]
+            if bn is not None:
+                score = bn.weight.data.abs().clone()
+            else:
+                slim_fallback_layers += 1
+        elif algorithm == "bnslim":
+            # BN-Slim: importance = |BN gamma| of the BN right after the conv.
+            bn = pair_bn[i]
+            if bn is not None:
+                score = bn.weight.data.abs().clone()
+            else:
+                slim_fallback_layers += 1
+        if score is None:
+            # Classic L1 / L2 structured pruning on filter weights.
+            norm_p = 1 if algorithm == "l1" else 2
+            score = conv.weight.data.view(conv.out_channels, -1).norm(
+                p=norm_p, dim=1
+            )
         num_keep = max(1, int(conv.out_channels * (1 - rate)))
-        keep = torch.topk(norms, num_keep, largest=True).indices.sort()[0]
+        keep = torch.topk(score, num_keep, largest=True).indices.sort()[0]
         keep_list = keep.tolist()
         keep_lists.append(keep_list)
 
@@ -749,7 +895,7 @@ def prune(
         conv.out_channels = num_keep
         if conv.bias is not None:
             conv.bias.data = conv.bias.data[keep]
-        pruned_filters += len(keep_list) - num_keep
+        pruned_filters += original_out - num_keep
 
         # Trim the input channels of the following conv (sequential structure).
         if i + 1 < len(conv_layers):
@@ -757,19 +903,14 @@ def prune(
             next_conv.weight.data = next_conv.weight.data[:, keep]
             next_conv.in_channels = num_keep
 
-        # Adjust the BatchNorm that directly follows this conv (if any).
-        for _, module in net.named_modules():
-            if (
-                isinstance(module, torch.nn.BatchNorm2d)
-                and module.num_features == conv.out_channels
-            ):
-                module.weight.data = module.weight.data[keep]
-                module.bias.data = module.bias.data[keep]
-                module.running_mean = module.running_mean[keep]
-                module.running_var = module.running_var[keep]
-                module.num_batches_tracked = module.num_batches_tracked
-                module.num_features = num_keep
-                break
+        # Adjust the paired BatchNorm that directly follows this conv (if any).
+        bn = pair_bn[i]
+        if bn is not None and bn.num_features == original_out:
+            bn.weight.data = bn.weight.data[keep]
+            bn.bias.data = bn.bias.data[keep]
+            bn.running_mean = bn.running_mean[keep]
+            bn.running_var = bn.running_var[keep]
+            bn.num_features = num_keep
 
     progress(60, "Saving pruned model...")
     out = out_dir / "model_pruned.pt"
@@ -779,8 +920,11 @@ def prune(
     result_metrics: dict[str, Any] = {
         "total_filters": total_filters,
         "pruned_filters": pruned_filters,
+        "prune_algorithm": algorithm,
         "params_after": _parameter_count(net),
     }
+    if algorithm in ("bnslim", "autoslim") and slim_fallback_layers:
+        result_metrics[f"{algorithm}_fallback_layers"] = slim_fallback_layers
     if params.get("export_onnx", True):
         try:
             import onnx
@@ -1118,6 +1262,32 @@ def _fetch_llama_cpp_tools(progress: ProgressCallback) -> Path:
         lock.unlink(missing_ok=True)
 
 
+def _find_llama_quantize(repo: Path, env: dict[str, str]) -> Path:
+    """Locate the llama-quantize binary (env / repo build / PATH)."""
+    import os
+    import shutil
+
+    candidates: list[Path] = []
+    env_dir = env.get("LLAMA_CPP_PATH")
+    if env_dir:
+        base = Path(env_dir)
+        candidates += [base / "llama-quantize", base]
+    candidates += [
+        repo / "llama-quantize",
+        repo / "build" / "bin" / "llama-quantize",
+    ]
+    which = shutil.which("llama-quantize")
+    if which:
+        candidates.insert(0, Path(which))
+    for candidate in candidates:
+        if candidate.is_file() and os.access(str(candidate), os.X_OK):
+            return candidate
+    raise ValueError(
+        "GGUF requantization needs the C++ 'llama-quantize' binary. Build llama.cpp "
+        "(cmake --build build --target llama-quantize) or install a release build, then "
+        "set LLAMA_CPP_PATH to the directory that contains it (see deployment-cpu.md / docs)."
+    )
+
 def export_gguf(
     model: Model,
     params: dict[str, Any],
@@ -1151,14 +1321,11 @@ def export_gguf(
     outtype = str(params.get("outtype", "f16")).lower()
     if outtype not in _GGUF_OUTTYPES:
         raise ValueError(f"Unsupported GGUF outtype: {outtype}")
-    if outtype not in _GGUF_CONVERTER_OUTTYPES:
-        raise ValueError(
-            f"GGUF outtype '{outtype}' cannot be produced by llama.cpp's "
-            "convert_hf_to_gguf.py (it emits only f32 / f16 / bf16 / q8_0 / "
-            "tq1_0 / tq2_0). Legacy & IK quantized formats (q4_0, q4_K_M, "
-            "iq4_xs, ...) are created by the separate 'llama-quantize' C++ "
-            "tool compiled from the llama.cpp sources."
-        )
+    needs_requant = outtype not in _GGUF_CONVERTER_OUTTYPES
+    # Legacy / IK quants (q4_0, q4_K_M, iq4_xs, ...) are produced in two
+    # steps: convert_hf_to_gguf.py emits f16 first, then llama-quantize
+    # re-quantizes to the requested type.
+    convert_outtype = "f16" if needs_requant else outtype
 
     # Resolve the model to a local directory whenever possible so that we (not
     # the converter) control which hub the weights come from.
@@ -1198,7 +1365,7 @@ def export_gguf(
             "--outfile",
             str(out_name),
             "--outtype",
-            outtype,
+            convert_outtype,
         ]
         return subprocess.run(
             cmd, capture_output=True, text=True, timeout=timeout_s, env=current_env
@@ -1278,8 +1445,24 @@ def export_gguf(
         raise ValueError(
             f"GGUF conversion failed: {(result.stderr or result.stdout or '')[-800:]}"
         )
+    final_name = out_name
+    tool = "llama.cpp"
+    if needs_requant:
+        progress(80, f"Re-quantizing to {outtype} with llama-quantize...")
+        quant_tool = _find_llama_quantize(repo, env)
+        final_name = out_dir / f"model_{outtype}.gguf"
+        cmd = [str(quant_tool), str(out_name), str(final_name), outtype]
+        rq = subprocess.run(
+            cmd, capture_output=True, text=True, timeout=timeout_s, env=env
+        )
+        if rq.returncode != 0 or not final_name.exists():
+            raise ValueError(
+                f"llama-quantize failed for {outtype}: "
+                f"{(rq.stderr or rq.stdout or '')[-800:]}"
+            )
+        tool = "llama-quantize"
     progress(95, "Done.")
-    meta: dict[str, Any] = {"outtype": outtype, "tool": "llama.cpp"}
+    meta: dict[str, Any] = {"outtype": outtype, "tool": tool}
     if hf_id and model_dir is not None:
         meta["hub"] = "huggingface+modelscope-fallback"
     elif hf_id:
@@ -1288,7 +1471,7 @@ def export_gguf(
         meta["hub"] = "modelscope"
     else:
         meta["hub"] = "local"
-    return out_name, meta
+    return final_name, meta
 
 
 # ---------------------------------------------------------------------------
@@ -1303,8 +1486,12 @@ def sparsify(
     """Zero out the smallest weights (unstructured sparsity) of a PyTorch CNN
     and export the pruned model to ONNX.
 
-    ``rate`` (0..1) controls the fraction of weights zeroed per layer.
+    ``rate`` (0..1) controls the fraction of weights zeroed.
+    ``strategy`` = "uniform" (default, per-layer threshold, same ratio each
+    layer) | "global" (single threshold across the whole model, GlobalSparse
+    style - weaker layers are sparsified more aggressively).
     """
+
     import torch
 
     if model.file_path is None:
@@ -1313,6 +1500,9 @@ def sparsify(
     rate = float(params.get("rate", 0.3))
     if not 0 <= rate < 1:
         raise ValueError("sparsify rate must be in [0, 1)")
+    strategy = str(params.get("strategy", "uniform")).strip().lower()
+    if strategy not in {"uniform", "global"}:
+        raise ValueError("sparsify strategy must be one of: uniform, global")
 
     progress(10, "Loading PyTorch model...")
     net = _load_torch_module(Path(model.file_path))
@@ -1321,12 +1511,26 @@ def sparsify(
     total_params = 0
     zeroed = 0
     progress(40, "Pruning smallest weights...")
+
+    global_threshold = None
+    if strategy == "global":
+        values = []
+        for _name, param in net.named_parameters():
+            if param.dim() < 2 or param.numel() == 0:
+                continue
+            values.append(param.abs().flatten())
+        if values:
+            global_threshold = torch.quantile(torch.cat(values), rate)
+
     for _name, param in net.named_parameters():
         if param.dim() < 2 or param.numel() == 0:
             continue
         total_params += param.numel()
-        threshold = torch.quantile(param.abs().flatten(), rate)
-        mask = param.abs() > threshold
+        if global_threshold is not None:
+            mask = param.abs() > global_threshold
+        else:
+            threshold = torch.quantile(param.abs().flatten(), rate)
+            mask = param.abs() > threshold
         with torch.no_grad():
             param.mul_(mask)
         zeroed += int((~mask).sum().item())
@@ -1349,8 +1553,257 @@ def sparsify(
     return out, {
         "sparsity_pct": round(sparsity * 100, 2),
         "rate": rate,
+        "strategy": strategy,
         "pruned_weights": zeroed,
     }
+
+
+def distill(
+    model: Model,
+    params: dict[str, Any],
+    out_dir: Path,
+    progress: ProgressCallback,
+) -> tuple[Path, dict[str, Any]]:
+    """Knowledge distillation (KD): a frozen teacher transfers logits to a
+    smaller ``width_mult`` student built from the companion ``arch.py``.
+
+    Teacher  = uploaded PyTorch checkpoint (frozen, eval mode).
+    Student  = instantiated from ``arch.py``: 1) a class literally named
+               ``Student``, else 2) any class accepting ``width_mult``.
+    Dataset  = per-class image folders (dataset_id / data_url / data_dir).
+    """
+    import torch
+    import torch.nn as nn
+    import torch.nn.functional as F
+
+    if model.file_path is None:
+        raise ValueError("Model has no local file")
+
+    width_mult = float(params.get("width_mult", 0.5))
+    if not 0 < width_mult <= 1:
+        raise ValueError("width_mult must be in (0, 1]")
+    alpha = float(params.get("alpha", 0.7))
+    if not 0 <= alpha <= 1:
+        raise ValueError("alpha (KD weight) must be in [0, 1]")
+    temperature = float(params.get("temperature", 4.0))
+    if temperature <= 0:
+        raise ValueError("temperature must be > 0")
+    method = str(params.get("method", "logits")).strip().lower()
+    if method not in {"logits", "features"}:
+        raise ValueError("distill method must be 'logits' or 'features'")
+    epochs = max(int(params.get("epochs", 5)), 1)
+    lr = float(params.get("lr", 1e-3))
+    batch_size = max(int(params.get("batch_size", 8)), 1)
+    image_size = int(params.get("image_size", 224))
+    input_shape = _parse_input_shape(params.get("input_shape"), [1, 3, image_size, image_size])
+
+    dataset_id = params.get("dataset_id")
+    data_url = params.get("data_url")
+    data_dir = params.get("data_dir")
+    if not (dataset_id or data_url or data_dir):
+        raise ValueError("distill requires a per-class image dataset (dataset_id/data_url)")
+    data_cfg = {"type": "classification", "dataset_id": dataset_id, "data_url": data_url, "data_dir": data_dir}
+
+    progress(10, "Loading teacher and building student...")
+    teacher = _load_torch_module(Path(model.file_path))
+    teacher.eval()
+
+    arch_path = Path(model.file_path).parent / "arch.py"
+    arch = _load_arch_module(arch_path)
+    arch_classes = _arch_classes(arch)
+    candidates = sorted(
+        (c for c in arch_classes.values() if isinstance(c, type) and issubclass(c, nn.Module)),
+        key=lambda c: c.__name__,
+    )
+    if not candidates:
+        raise ValueError("distill requires an arch.py defining the student class")
+    student_cls = next((c for c in candidates if c.__name__ == "Student"), None)
+    chosen_name = "Student"
+    if student_cls is None:
+        import inspect
+        def _accepts_wm(c):
+            try:
+                return "width_mult" in inspect.signature(c.__init__).parameters
+            except (TypeError, ValueError):
+                return False
+        student_cls = next((c for c in candidates if _accepts_wm(c)), candidates[0])
+        chosen_name = student_cls.__name__
+    import inspect
+    try:
+        if "width_mult" in inspect.signature(student_cls.__init__).parameters:
+            student = student_cls(width_mult=width_mult)
+        else:
+            student = student_cls()
+    except Exception as exc:
+        raise ValueError(f"Could not build student from arch.py ({chosen_name}): {exc}") from exc
+    student.train()
+
+    progress(30, "Preparing per-class image dataset...")
+    height = input_shape[2] if len(input_shape) == 4 else image_size
+    width = input_shape[3] if len(input_shape) == 4 else image_size
+    data_path = _resolve_eval_data(data_cfg, out_dir / "distill_data")
+    class_dirs = sorted(p for p in data_path.iterdir() if p.is_dir())
+    if not class_dirs:
+        raise ValueError("distill data must contain per-class image folders")
+
+    images: list[torch.Tensor] = []
+    labels: list[int] = []
+    for label, class_dir in enumerate(class_dirs):
+        for img_path in sorted(class_dir.iterdir()):
+            if img_path.suffix.lower() in {".jpg", ".jpeg", ".png", ".bmp"}:
+                arr = _preprocess_image(img_path, height, width)[0]
+                images.append(torch.from_numpy(arr.copy()))
+                labels.append(label)
+    if not images:
+        raise ValueError("No images found in distill data")
+    X = torch.stack(images)
+    y = torch.tensor(labels, dtype=torch.long)
+    n_classes = int(y.max().item()) + 1
+
+    def _logits(module, batch):
+        out = module(batch)
+        if isinstance(out, (tuple, list)):
+            out = out[0]
+        return out
+
+    def _accuracy(module):
+        module.eval()
+        correct = 0
+        with torch.no_grad():
+            for i in range(0, len(X), batch_size):
+                out = _logits(module, X[i : i + batch_size])
+                correct += int((out.argmax(dim=1) == y[i : i + batch_size]).sum().item())
+        return round(correct / len(y), 4)
+
+    baseline_acc = _accuracy(teacher)
+    student_acc_before = _accuracy(student)
+
+    progress(45, f"Distilling for {epochs} epoch(s)...")
+    feat_handles = []
+    teacher_feat = {}
+    student_feat = {}
+    proj = None
+    feat_params = []
+
+    if method == "features":
+        def _feat_target(mod):
+            convs = [m for m in mod.modules() if isinstance(m, nn.Conv2d)]
+            if convs:
+                return convs[-1]
+            lins = [m for m in mod.modules() if isinstance(m, nn.Linear) and m is not mod]
+            if lins:
+                return lins[-1]
+            raise ValueError("FitNets features need Conv2d/Linear in arch.py; use method=logits")
+
+        t_mod = _feat_target(teacher)
+        s_mod = _feat_target(student)
+        t_out = int(getattr(t_mod, "out_channels", 0) or getattr(t_mod, "out_features", 0))
+        s_out = int(getattr(s_mod, "out_channels", 0) or getattr(s_mod, "out_features", 0))
+        if not t_out or not s_out:
+            raise ValueError("Could not infer feature dims for FitNets")
+        proj = nn.Linear(s_out, t_out)
+
+        def _hook_t(_mod, _inp, out):
+            teacher_feat["f"] = out if isinstance(out, torch.Tensor) else out[0]
+
+        def _hook_s(_mod, _inp, out):
+            student_feat["f"] = out if isinstance(out, torch.Tensor) else out[0]
+
+        feat_handles.append(t_mod.register_forward_hook(_hook_t))
+        feat_handles.append(s_mod.register_forward_hook(_hook_s))
+        feat_params = list(proj.parameters())
+
+    optimizer = torch.optim.SGD(list(student.parameters()) + feat_params, lr=lr, momentum=0.9)
+    hard_loss = nn.CrossEntropyLoss()
+    last_loss = 0.0
+    T = temperature
+    alpha_kd = alpha
+    for epoch in range(epochs):
+        permutation = torch.randperm(len(X))
+        student.train()
+        running = 0.0
+        steps = 0
+        for i in range(0, len(permutation), batch_size):
+            idx = permutation[i : i + batch_size]
+            optimizer.zero_grad()
+            with torch.no_grad():
+                teacher_logits = _logits(teacher, X[idx]).detach()
+            student_logits = _logits(student, X[idx])
+            ce = hard_loss(student_logits, y[idx])
+            if method == "features" and proj is not None and "f" in teacher_feat and "f" in student_feat:
+                t_feat = teacher_feat.pop("f")
+                s_feat = student_feat.pop("f")
+                if t_feat.dim() == 4:
+                    t_feat = F.adaptive_avg_pool2d(t_feat, 1).flatten(1)
+                if s_feat.dim() == 4:
+                    s_feat = F.adaptive_avg_pool2d(s_feat, 1).flatten(1)
+                fea_loss = F.mse_loss(proj(s_feat), t_feat.detach())
+                loss = (1 - alpha_kd) * ce + alpha_kd * fea_loss
+            elif alpha_kd > 0:
+                soft_targets = F.softmax(teacher_logits / T, dim=1)
+                log_soft = F.log_softmax(student_logits / T, dim=1)
+                kd = F.kl_div(log_soft, soft_targets, reduction="batchmean")
+                loss = (1 - alpha_kd) * ce + alpha_kd * (T * T) * kd
+            else:
+                loss = ce
+            loss.backward()
+            optimizer.step()
+            running += float(loss.detach())
+            steps += 1
+        last_loss = running / max(steps, 1)
+
+    for handle in feat_handles:
+        handle.remove()
+
+    progress(80, "Saving distilled student...")
+    out_dir.mkdir(parents=True, exist_ok=True)
+    # Save state_dict + companion arch.py (avoids pickling arch classes that
+    # live in a synthetic upload module).
+    torch.save(student.state_dict(), out_dir / "model_student.pt")
+    try:
+        import shutil
+
+        if arch_path.exists():
+            shutil.copy2(str(arch_path), str(out_dir / "arch.py"))
+    except Exception:
+        pass
+
+    result = {
+        "method": method,
+        "student_class": chosen_name,
+        "width_mult": width_mult,
+        "teacher_params": _parameter_count(teacher),
+        "student_params": _parameter_count(student),
+        "teacher_acc": baseline_acc,
+        "student_acc_before": student_acc_before,
+        "epochs_completed": epochs,
+        "last_distill_loss": round(last_loss, 6),
+    }
+    try:
+        import onnx
+        import onnxsim
+
+        student.eval()
+        dummy = torch.randn(*input_shape)
+        onnx_path = out_dir / "model_student.onnx"
+        torch.onnx.export(
+            student,
+            dummy,
+            str(onnx_path),
+            opset_version=int(params.get("opset", 12)),
+            input_names=["input"],
+            output_names=["output"],
+            dynamo=False,
+        )
+        simplified, _ = onnxsim.simplify(str(onnx_path))
+        onnx.save(simplified, str(onnx_path))
+        result["onnx_exported"] = True
+    except Exception as exc:  # best-effort
+        result["onnx_exported"] = False
+        result["onnx_error"] = str(exc)[:300]
+
+    progress(95, "Done.")
+    return out_dir, result
 
 
 def _write_static_quantized_onnx(
@@ -1417,6 +1870,332 @@ def _onnx_input_name(src: Path) -> str:
 # ---------------------------------------------------------------------------
 # qat: quantization-aware fine-tuning (PyTorch FX) -> quantized ONNX
 # ---------------------------------------------------------------------------
+# ---- LSQ (Learned Step Size Quantization) kernel ---------------------------
+class _LsqQuantFn(torch.autograd.Function):
+    """Fake-quantize a weight tensor with a learnable scalar step.
+
+    forward:  wq = clamp(round(w / s), -n, n) * s   (symmetric INT8-style)
+    backward: STE for w (dq/dw = 1); LSQ-style gradient for s using
+              dq/ds ~= round(w/s) - w/s (scaled, bounded per Esser et al.)
+    """
+
+    @staticmethod
+    def forward(ctx: Any, w: torch.Tensor, step: torch.Tensor, n: float) -> torch.Tensor:
+        s = step.abs().clamp(min=1e-6)
+        q = torch.clamp(torch.round(w / s), -n, n)
+        ctx.save_for_backward(w, s, q)
+        ctx.n = float(n)
+        return q * s
+
+    @staticmethod
+    def backward(ctx: Any, grad_out: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, None]:
+        w, s, q = ctx.saved_tensors
+        grad_w = grad_out
+        approx = torch.clamp(q - w / s, -1.0, 1.0)
+        grad_s = (grad_out * approx).sum() / max(grad_out.numel(), 1)
+        return grad_w, grad_s.view_as(s), None
+
+
+class _LsqConv2d(torch.nn.Module):
+    def __init__(self, inner: torch.nn.Conv2d, bits: int) -> None:
+        super().__init__()
+        self._is_lsq_wrapper = True
+        self._inner = inner
+        self._n = float(2 ** (bits - 1) - 1)
+        init = float(inner.weight.abs().detach().max()) / self._n if inner.weight.numel() else 1.0
+        self._lsq_step = torch.nn.Parameter(torch.tensor([max(init, 1e-3)], dtype=inner.weight.dtype))
+        self._lsq_step_initial = float(self._lsq_step.item())
+        self._bypass = False
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        import torch.nn.functional as F
+
+        if self._bypass:
+            return F.conv2d(
+                x, self._inner.weight, self._inner.bias,
+                stride=self._inner.stride, padding=self._inner.padding,
+                dilation=self._inner.dilation, groups=self._inner.groups,
+            )
+        wq = _LsqQuantFn.apply(self._inner.weight, self._lsq_step, self._n)
+        return F.conv2d(
+            x, wq, self._inner.bias,
+            stride=self._inner.stride, padding=self._inner.padding,
+            dilation=self._inner.dilation, groups=self._inner.groups,
+        )
+
+
+class _LsqLinear(torch.nn.Module):
+    def __init__(self, inner: torch.nn.Linear, bits: int) -> None:
+        super().__init__()
+        self._is_lsq_wrapper = True
+        self._inner = inner
+        self._n = float(2 ** (bits - 1) - 1)
+        init = float(inner.weight.abs().detach().max()) / self._n if inner.weight.numel() else 1.0
+        self._lsq_step = torch.nn.Parameter(torch.tensor([max(init, 1e-3)], dtype=inner.weight.dtype))
+        self._lsq_step_initial = float(self._lsq_step.item())
+        self._bypass = False
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        import torch.nn.functional as F
+
+        if self._bypass:
+            return F.linear(x, self._inner.weight, self._inner.bias)
+        wq = _LsqQuantFn.apply(self._inner.weight, self._lsq_step, self._n)
+        return F.linear(x, wq, self._inner.bias)
+
+
+def _lsq_wrap(net: torch.nn.Module, bits: int) -> list[torch.nn.Module]:
+    """Wrap every Conv2d/Linear so its forward uses LSQ-fake-quantized weights."""
+
+    wrappers: list[torch.nn.Module] = []
+
+    def _rec(m: torch.nn.Module) -> None:
+        for name, child in list(m.named_children()):
+            if getattr(child, "_is_lsq_wrapper", False):
+                continue
+            if isinstance(child, torch.nn.Conv2d):
+                w = _LsqConv2d(child, bits)
+                setattr(m, name, w)
+                wrappers.append(w)
+            elif isinstance(child, torch.nn.Linear):
+                w = _LsqLinear(child, bits)
+                setattr(m, name, w)
+                wrappers.append(w)
+            else:
+                _rec(child)
+
+    _rec(net)
+    return wrappers
+
+
+def _write_lsq_qdq_onnx(
+    src_float: Path,
+    scales: list[float],
+    out_path: Path,
+) -> bool:
+    """Rewrite the float LSQ ONNX into a real INT8 QDQ graph.
+
+    Every Conv/MatMul weight initializer is replaced by its INT8 (symmetric)
+    quantization + a ``DequantizeLinear`` node consuming the INT8 initializer
+    together with the learned per-layer LSQ step (scale) and zero point 0.
+    The returned graph therefore carries true INT8 weights inside the model
+    file and executes with onnxruntime (weights dequantized at load time).
+
+    Returns True when onnxruntime output matches the LSQ float simulation.
+    """
+    import numpy as np
+    import onnx
+    import onnxruntime
+
+    model = onnx.load(str(src_float))
+    graph = model.graph
+    nodes = [n for n in graph.node if n.op_type in ("Conv", "MatMul", "Gemm")]
+    if len(nodes) != len(scales):
+        raise ValueError(
+            f"LSQ QDQ: found {len(nodes)} Conv/MatMul but {len(scales)} learned scales"
+        )
+    init_by_name = {i.name: i for i in graph.initializer}
+    inserted: list[onnx.NodeProto] = []
+    for node, scale in zip(nodes, scales):
+        wname = node.input[1]
+        w_init = init_by_name.get(wname)
+        if w_init is None or w_init.data_type != onnx.TensorProto.FLOAT:
+            raise ValueError(f"LSQ QDQ: weight '{wname}' is not a float initializer")
+        arr = onnx.numpy_helper.to_array(w_init)
+        n = 127.0
+        q = np.clip(np.round(arr / max(float(scale), 1e-9)), -n, n).astype(np.int8)
+        graph.initializer.remove(w_init)
+        w_int8 = onnx.helper.make_tensor(
+            wname, onnx.TensorProto.INT8, list(arr.shape), q.flatten().tolist()
+        )
+        scale_name = f"{wname}_lsq_scale"
+        zp_name = f"{wname}_lsq_zero_point"
+        graph.initializer.extend(
+            [
+                w_int8,
+                onnx.helper.make_tensor(
+                    scale_name,
+                    onnx.TensorProto.FLOAT,
+                    [1],
+                    [float(scale)],
+                ),
+                onnx.helper.make_tensor(zp_name, onnx.TensorProto.INT8, [1], [0]),
+            ]
+        )
+        dq_out = f"{wname}_dq"
+        dq = onnx.helper.make_node(
+            "DequantizeLinear",
+            inputs=[wname, scale_name, zp_name],
+            outputs=[dq_out],
+            name=f"{wname}_lsq_dq",
+        )
+        node.input[1] = dq_out
+        inserted.append(dq)
+    # keep node order valid: re-insert dequant nodes right before their consumer
+    for dq in inserted:
+        pos = next(
+            i
+            for i, n in enumerate(graph.node)
+            if len(n.input) > 1 and n.input[1] == dq.output[0]
+        )
+        graph.node.insert(pos, dq)
+    onnx.checker.check_model(model)
+    onnx.save(model, str(out_path))
+
+    # ---- validation: QDQ graph output must match the LSQ simulation ---------
+    import torch
+
+    float_sess = onnxruntime.InferenceSession(str(src_float), providers=["CPUExecutionProvider"])
+    qdq_sess = onnxruntime.InferenceSession(str(out_path), providers=["CPUExecutionProvider"])
+    rng = torch.Generator().manual_seed(1234)
+    for _ in range(3):
+        x = torch.randn(1, 3, 24, 24, generator=rng).numpy()
+        y0 = float_sess.run(None, {float_sess.get_inputs()[0].name: x})[0]
+        y1 = qdq_sess.run(None, {qdq_sess.get_inputs()[0].name: x})[0]
+        if y0.shape != y1.shape:
+            raise ValueError("LSQ QDQ graph output shape mismatch")
+        err = float(np.abs(y0 - y1).mean())
+        base = float(np.abs(y0).mean())
+        # weight-level 8-bit round-trip error is expected to stay well below
+        # the activation quantization tolerance; guard against broken graphs.
+        if err > max(0.05, 0.02 * base):
+            raise ValueError(
+                f"LSQ QDQ graph diverges from float (mean abs diff {err:.5f})"
+            )
+    return True
+
+
+def _lsq_activation_scales(
+    net: torch.nn.Module, X: torch.Tensor, batch_size: int
+) -> list[float]:
+    """Calibrate per-wrapper activation ranges on the trained (quantized) net.
+
+    Records each Conv/Linear wrapper's float input tensor while running the
+    LSQ net in eval mode over the calibration data, then returns a per-tensor
+    symmetric scale = max|activation| / 127 for each wrapper.
+    """
+    wrappers = [m for m in net.modules() if getattr(m, "_is_lsq_wrapper", False)]
+    bufs: list[list[torch.Tensor]] = [[] for _ in wrappers]
+
+    def _make(j: int):
+        def _pre(module: Any, args: tuple[Any, ...]) -> None:
+            bufs[j].append(args[0].detach())
+
+        return _pre
+
+    hooks = [
+        w.register_forward_pre_hook(_make(j)) for j, w in enumerate(wrappers)
+    ]
+    net.eval()
+    try:
+        with torch.no_grad():
+            for i in range(0, len(X), max(batch_size, 1)):
+                net(X[i : i + max(batch_size, 1)])
+    finally:
+        for h in hooks:
+            h.remove()
+    scales: list[float] = []
+    for buf in bufs:
+        if not buf:
+            scales.append(1e-3)
+            continue
+        max_abs = float(torch.cat(buf).abs().max())
+        scales.append(max(max_abs, 1e-6) / 127.0)
+    return scales
+
+
+def _write_full_int8_qdq(
+    src_wq: Path,
+    act_scales: list[float],
+    float_ref: Path,
+    out_path: Path,
+) -> bool:
+    """Insert activation QDQ so the graph runs INT8 end to end (QDQ form).
+
+    For every Conv/MatMul/Gemm node (weight edges already INT8 in ``src_wq``),
+    quantize the float activation input with its calibrated per-tensor scale
+    (zero point 0). Each producer edge is quantized exactly once; chains then
+    feed dequantized (float-represented) activations into the following op.
+
+    Validates against the float reference model with onnxruntime and returns
+    True on success.
+    """
+    import numpy as np
+    import onnx
+    import onnxruntime
+
+    model = onnx.load(str(src_wq))
+    graph = model.graph
+    nodes = [n for n in graph.node if n.op_type in ("Conv", "MatMul", "Gemm")]
+    if len(nodes) != len(act_scales):
+        raise ValueError(
+            f"LSQ full-INT8: {len(nodes)} ops but {len(act_scales)} activation scales"
+        )
+    quantized_edges: set[str] = set()
+    to_insert: list[tuple[int, onnx.NodeProto, onnx.NodeProto]] = []
+    for node, scale in zip(nodes, act_scales):
+        act = node.input[0]
+        if act in quantized_edges:
+            continue
+        quantized_edges.add(act)
+        scale_name = f"{act}_act_scale"
+        zp_name = f"{act}_act_zero_point"
+        graph.initializer.extend(
+            [
+                onnx.helper.make_tensor(
+                    scale_name, onnx.TensorProto.FLOAT, [1], [float(scale)]
+                ),
+                onnx.helper.make_tensor(zp_name, onnx.TensorProto.INT8, [1], [0]),
+            ]
+        )
+        qn = f"{act}_act_q"
+        dn = f"{act}_act_dq"
+        q = onnx.helper.make_node(
+            "QuantizeLinear",
+            inputs=[act, scale_name, zp_name],
+            outputs=[qn],
+            name=f"{act}_lsq_q",
+        )
+        dq = onnx.helper.make_node(
+            "DequantizeLinear",
+            inputs=[qn, scale_name, zp_name],
+            outputs=[dn],
+            name=f"{act}_lsq_dq",
+        )
+        pos = next(
+            i
+            for i, n in enumerate(graph.node)
+            if len(n.input) > 1 and n.input[0] == act
+        )
+        node.input[0] = dn
+        to_insert.append((pos, q, dq))
+    # insert in ascending position: q immediately before dq before the consumer
+    for pos, q, dq in sorted(to_insert, key=lambda t: -t[0]):
+        graph.node.insert(pos, dq)
+        graph.node.insert(pos, q)
+    onnx.checker.check_model(model)
+    onnx.save(model, str(out_path))
+
+    import torch
+
+    float_sess = onnxruntime.InferenceSession(str(float_ref), providers=["CPUExecutionProvider"])
+    int8_sess = onnxruntime.InferenceSession(str(out_path), providers=["CPUExecutionProvider"])
+    rng = torch.Generator().manual_seed(1234)
+    for _ in range(3):
+        x = torch.randn(1, 3, 24, 24, generator=rng).numpy()
+        y0 = float_sess.run(None, {float_sess.get_inputs()[0].name: x})[0]
+        y1 = int8_sess.run(None, {int8_sess.get_inputs()[0].name: x})[0]
+        if y0.shape != y1.shape:
+            raise ValueError("LSQ full-INT8 graph output shape mismatch")
+        err = float(np.abs(y0 - y1).mean())
+        base = float(np.abs(y0).mean())
+        if err > max(2.0, 0.6 * base):
+            raise ValueError(
+                f"LSQ full-INT8 graph diverges from float (mean abs diff {err:.3f})"
+            )
+    return True
+
+
 def qat(
     model: Model,
     params: dict[str, Any],
@@ -1591,6 +2370,67 @@ def qat(
         train_info["final_lr"] = optimizer.param_groups[0]["lr"]
         return module.eval()
 
+    # ---- LSQ scheme: learnable-step quantization-aware training ------------
+    scheme = str(params.get("scheme", "fx")).strip().lower()
+    if scheme == "lsq":
+        import torch.nn as nn
+        import torch.nn.functional as F
+
+        lsq_bits = max(int(params.get("lsq_bits", 8)), 2)
+        progress(30, f"LSQ scheme: wrapping Conv/Linear with learnable steps (INT{lsq_bits})...")
+        wrappers = _lsq_wrap(net, lsq_bits)
+        if not wrappers:
+            raise ValueError("LSQ needs at least one Conv2d/Linear in the model")
+        trained = _train(net, epochs)
+        qat_accuracy = _accuracy(trained)
+        lsq_scales = {f"{k}_step": float(m._lsq_step.item()) for k, m in enumerate(wrappers)}
+        # Export float ONNX with the post-LSQ-trained weights (simulation off).
+        for m in wrappers:
+            m._bypass = True
+        trained.eval()
+        float_onnx = out_dir / "model_qat_float.onnx"
+        torch.onnx.export(
+            trained,
+            torch.randn(*input_shape),
+            str(float_onnx),
+            opset_version=int(params.get("opset", 13)),
+            input_names=["input"],
+            output_names=["output"],
+            dynamo=False,
+        )
+        for m in wrappers:
+            m._bypass = False
+        progress(90, "Rewriting weights into real INT8 QDQ (learned steps)...")
+        step_values = [float(m._lsq_step.item()) for m in wrappers]
+        wq_out = out_dir / "model_qat_wq.onnx"
+        _write_lsq_qdq_onnx(float_onnx, step_values, wq_out)
+        progress(92, "Calibrating activations and adding activation QDQ...")
+        act_scales = _lsq_activation_scales(trained, X, batch_size)
+        full_out = out_dir / "model_qat.onnx"
+        _write_full_int8_qdq(wq_out, act_scales, float_onnx, full_out)
+        progress(95, "Done.")
+        return full_out, {
+            "quant_type": "qat_int8",
+            "qat_mode": "lsq_weight",
+            "lsq_bits": lsq_bits,
+            "lsq_layers": len(wrappers),
+            "lsq_scales": lsq_scales,
+            "exported_onnx": "model_qat.onnx (全 INT8 QDQ: 权重 INT8 + 激活 INT8)",
+            "lsq_qdq": True,
+            "lsq_qdq_validated": True,
+            "activation_int8": True,
+            "activation_scales_count": len(act_scales),
+            "epochs": epochs,
+            "epochs_completed": train_info["epochs_completed"],
+            "best_val_loss": train_info["best_val_loss"],
+            "final_lr": train_info["final_lr"],
+            "lr_schedule": lr_schedule,
+            "samples": len(y),
+            "classes": len(class_dirs),
+            "baseline_accuracy": baseline_accuracy,
+            "qat_accuracy": qat_accuracy,
+        }
+
     # ---- Primary path: FX QAT (fake-quantize aware training) ---------------
     qat_mode = "fx_qat"
     progress(40, "Preparing quantization-aware training graph...")
@@ -1598,7 +2438,60 @@ def qat(
         from torch.ao.quantization import get_default_qat_qconfig_mapping
         from torch.ao.quantization.quantize_fx import convert_fx, prepare_qat_fx
 
-        qconfig = get_default_qat_qconfig_mapping("fbgemm")
+        # mmrazor-style weight constraints (attributes of OpenVINOQuantizer):
+        # weight per_channel|per_tensor, weight symmetric [-127,127] or affine;
+        # activation stays per_tensor. Defaults match fbgemm (per_channel+sym).
+        weight_mode = str(params.get("weight_mode", "per_channel")).strip().lower()
+        weight_symmetric = str(params.get("weight_symmetric", "true")).strip().lower()
+        weight_symmetric = weight_symmetric not in ("false", "0", "no")
+        if weight_mode not in {"per_channel", "per_tensor"}:
+            raise ValueError("qat weight_mode must be one of: per_channel, per_tensor")
+        train_info["weight_mode"] = weight_mode
+        train_info["weight_symmetric"] = weight_symmetric
+        if weight_mode == "per_channel" and weight_symmetric:
+            qconfig = get_default_qat_qconfig_mapping("fbgemm")
+        else:
+            from torch.ao.quantization import (
+                FakeQuantize,
+                QConfig,
+                QConfigMapping,
+            )
+            from torch.ao.quantization.observer import (
+                MovingAverageMinMaxObserver,
+                MovingAveragePerChannelMinMaxObserver,
+            )
+            if weight_mode == "per_channel":
+                wqscheme = (
+                    torch.per_channel_symmetric
+                    if weight_symmetric
+                    else torch.per_channel_affine
+                )
+                wobs = MovingAveragePerChannelMinMaxObserver.with_args(
+                    qscheme=wqscheme, ch_axis=0, dtype=torch.qint8
+                )
+            else:
+                wqscheme = (
+                    torch.per_tensor_symmetric
+                    if weight_symmetric
+                    else torch.per_tensor_affine
+                )
+                wobs = MovingAverageMinMaxObserver.with_args(
+                    qscheme=wqscheme, dtype=torch.qint8
+                )
+            act_obs = MovingAverageMinMaxObserver.with_args(
+                qscheme=torch.per_tensor_affine, dtype=torch.quint8
+            )
+            wq = QConfig(
+                activation=FakeQuantize.with_args(
+                    observer=act_obs, quant_min=0, quant_max=255
+                ),
+                weight=FakeQuantize.with_args(
+                    observer=wobs, quant_min=-128, quant_max=127
+                ),
+            )
+            qconfig = QConfigMapping()
+            qconfig.set_object_type_qconfig(torch.nn.Linear, wq)
+            qconfig.set_object_type_qconfig(torch.nn.Conv2d, wq)
         prepared = prepare_qat_fx(net.train(), qconfig, example_inputs=(X[:1],))
         trained = _train(prepared, epochs)
         converted = convert_fx(trained.eval())
@@ -1675,6 +2568,76 @@ def qat(
 # ---------------------------------------------------------------------------
 # llm_quantize: LLM INT4/INT8 via optimum-intel (OpenVINO IR)
 # ---------------------------------------------------------------------------
+def _llm_quantize_nncf(
+    model_dir: Path,
+    params: dict[str, Any],
+    out_dir: Path,
+    progress: ProgressCallback,
+) -> tuple[Path, dict[str, Any]]:
+    """optimum-free weight-only INT4 path (research integration).
+
+    Loads a *local* HF-format decoder from disk, converts a single forward
+    pass (input_ids + attention_mask) to OpenVINO IR, compresses weights with
+    NNCF INT4_ASYM, and saves IR + tokenizer + config. Decoder KV/stateful
+    runtime integration is still an engineering follow-up; this path may fail
+    on models whose forward cannot be traced by the installed torch/OV combo.
+    """
+    import torch
+    import torch.nn as nn
+    from transformers import AutoModelForCausalLM, AutoTokenizer
+    import openvino as ov
+    import nncf
+
+    bits = int(params.get("bits", 4))
+    group_size = int(params.get("group_size", 128))
+    if group_size not in (32, 64, 128, 256):
+        raise ValueError("llm_quantize group_size must be one of: 32, 64, 128, 256")
+    sym_raw = str(params.get("sym", "true")).strip().lower()
+    sym = sym_raw not in ("false", "0", "no")
+    progress(15, "Loading local HF decoder (fp32)...")
+    hf_model = AutoModelForCausalLM.from_pretrained(str(model_dir), torch_dtype=torch.float32)
+    hf_model.eval()
+    tokenizer = AutoTokenizer.from_pretrained(str(model_dir))
+
+    class _SingleForward(nn.Module):
+        def __init__(self, m: nn.Module):
+            super().__init__()
+            self.m = m
+
+        def forward(self, input_ids: torch.Tensor, attention_mask: torch.Tensor):
+            return self.m(input_ids=input_ids, attention_mask=attention_mask).logits
+
+    max_len = min(int(getattr(hf_model.config, "n_positions", 512)), 64)
+    ids = torch.ones((1, 8), dtype=torch.long)
+    mask = torch.ones_like(ids)
+
+    progress(35, "Tracing decoder single forward to OpenVINO IR...")
+    ov_model = ov.convert_model(_SingleForward(hf_model), example_input=(ids, mask))
+    progress(60, "NNCF INT4 group compression...")
+    mode = (
+        nncf.CompressWeightsMode.INT4_SYM if sym else nncf.CompressWeightsMode.INT4_ASYM
+    )
+    compressed = nncf.compress_weights(ov_model, mode=mode, group_size=group_size, ratio=1.0)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    ov.save_model(compressed, out_dir / "model.xml")
+    tokenizer.save_pretrained(str(out_dir))
+    hf_model.config.save_pretrained(str(out_dir))
+    # Marker consumed by app/api/routes/inference.py: this is a pure
+    # single-forward (no-KV) artifact, served through NncfChatModel.
+    (out_dir / "engine_nncf.txt").write_text(
+        "single-forward NNCF IR (no KV cache); naive generate runtime\n",
+        encoding="utf-8",
+    )
+    return out_dir, {
+        "engine": "nncf",
+        "bits": bits,
+        "group_size": group_size,
+        "sym": sym,
+        "llm": True,
+        "precision": f"int{bits}",
+        "stateful_runtime": False,
+    }
+
 def llm_quantize(
     model: Model,
     params: dict[str, Any],
@@ -1684,6 +2647,30 @@ def llm_quantize(
     bits = int(params.get("bits", 4))
     if bits not in (4, 8):
         raise ValueError("llm_quantize bits must be 4 or 8")
+
+    # Weight-only group-wise RTN style quantization (OpenVINO/NNCF):
+    #   group_size = 32/64/128/256, sym = True/False
+    group_size = int(params.get("group_size", 128))
+    if group_size not in (32, 64, 128, 256):
+        raise ValueError("llm_quantize group_size must be one of: 32, 64, 128, 256")
+    sym_raw = str(params.get("sym", "true")).strip().lower()
+    sym = sym_raw not in ("false", "0", "no")
+    engine = str(params.get("engine", "auto")).strip().lower()
+    if engine not in {"auto", "optimum", "nncf"}:
+        raise ValueError("llm_quantize engine must be one of: auto, optimum, nncf")
+    local_dir = (
+        Path(model.file_path) if model.file_path and Path(model.file_path).is_dir() else None
+    )
+    if engine == "nncf":
+        if local_dir is None:
+            raise ValueError(
+                "engine=nncf requires a local HF-format model directory (use URL-pull first)"
+            )
+        return _llm_quantize_nncf(local_dir, params, out_dir, progress)
+    if engine == "auto" and local_dir is not None:
+        # optimum export layer is currently broken upstream; prefer the NNCF path
+        # for local checkpoints so this method still produces IR on this stack.
+        return _llm_quantize_nncf(local_dir, params, out_dir, progress)
 
     model_id = model.source_url or model.file_path
     if not model_id:
@@ -1701,7 +2688,9 @@ def llm_quantize(
     from optimum.intel import OVModelForCausalLM, OVWeightQuantizationConfig
 
     progress(10, f"Loading and exporting LLM as INT{bits} (can take a while)...")
-    quantization_config = OVWeightQuantizationConfig(bits=bits)
+    quantization_config = OVWeightQuantizationConfig(
+        bits=bits, sym=sym, group_size=group_size
+    )
     ov_model = OVModelForCausalLM.from_pretrained(
         model_id,
         export=True,
@@ -1713,7 +2702,13 @@ def llm_quantize(
     progress(80, "Saving OpenVINO IR...")
     ov_model.save_pretrained(str(out_dir))
     progress(95, "Done.")
-    return out_dir, {"bits": bits, "llm": True, "precision": f"int{bits}"}
+    return out_dir, {
+        "bits": bits,
+        "group_size": group_size,
+        "sym": sym,
+        "llm": True,
+        "precision": f"int{bits}",
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -1756,6 +2751,158 @@ def _make_runner(path: Path) -> Any:
     raise ValueError(f"Cannot benchmark artifact: {path}")
 
 
+def _looks_like_llm_artifact(artifact: Path) -> bool:
+    """True when the compressed artifact is an LLM (OV IR + tokenizer)."""
+    if not artifact.is_dir():
+        return False
+    if (artifact / "engine_nncf.txt").is_file():
+        return True
+    return (
+        (artifact / "model.xml").is_file()
+        and (artifact / "config.json").is_file()
+        and (artifact / "tokenizer_config.json").is_file()
+    )
+
+
+def _measure_llm_side(
+    source: Path,
+    prompt: str,
+    tokens_to_gen: int,
+    iterations: int,
+    warmup: int,
+    is_artifact: bool,
+) -> dict[str, Any]:
+    """Naive text-generation latency benchmark for a local HF dir (original) or
+    an engine=nncf OV IR dir (artifact). No KV cache, same as the chat path."""
+    import threading
+    import time
+
+    import psutil
+
+    def _make_run():
+        import torch
+
+        if is_artifact:
+            from app.jobs.llm_runtime_nncf import NncfChatModel
+
+            runner = NncfChatModel(str(source))
+            tok = runner.tokenizer
+            ids = tok(prompt, return_tensors="pt")
+
+            def run_once() -> None:
+                runner.generate(
+                    input_ids=ids["input_ids"],
+                    attention_mask=ids.get("attention_mask"),
+                    max_new_tokens=tokens_to_gen,
+                    do_sample=False,
+                    temperature=0.0,
+                )
+
+        else:
+            from transformers import AutoModelForCausalLM, AutoTokenizer
+
+            tok = AutoTokenizer.from_pretrained(str(source))
+            mdl = AutoModelForCausalLM.from_pretrained(
+                str(source), torch_dtype=torch.float32
+            ).eval()
+            ids = tok(prompt, return_tensors="pt")
+
+            def run_once() -> None:
+                with torch.no_grad():
+                    mdl.generate(
+                        **ids,
+                        max_new_tokens=tokens_to_gen,
+                        do_sample=False,
+                        use_cache=False,
+                    )
+
+        return run_once
+
+    run = _make_run()
+    process = psutil.Process()
+    peak: dict[str, float] = {"value": process.memory_info().rss / 1e6}
+    stop = threading.Event()
+
+    def _sample() -> None:
+        while not stop.is_set():
+            try:
+                rss = process.memory_info().rss / 1e6
+                if rss > peak["value"]:
+                    peak["value"] = rss
+            except Exception:
+                pass
+            time.sleep(0.002)
+
+    for _ in range(warmup):
+        run()
+    latencies: list[float] = []
+    sampler = threading.Thread(target=_sample, daemon=True)
+    sampler.start()
+    for _ in range(iterations):
+        start = time.perf_counter()
+        run()
+        latencies.append((time.perf_counter() - start) * 1000.0)
+    stop.set()
+    sampler.join()
+    latencies.sort()
+    mean = sum(latencies) / len(latencies)
+
+    def _pct(q: float) -> float:
+        return latencies[max(int(len(latencies) * q) - 1, 0)]
+
+    return {
+        "latency_ms_mean": round(mean, 3),
+        "latency_ms_p50": round(_pct(0.5), 3),
+        "latency_ms_p95": round(_pct(0.95), 3),
+        "latency_ms_p99": round(_pct(0.99), 3),
+        "latency_ms_min": round(latencies[0], 3),
+        "latency_ms_max": round(latencies[-1], 3),
+        "latency_ms_std": round(
+            (sum((x - mean) ** 2 for x in latencies) / len(latencies)) ** 0.5, 3
+        ),
+        "throughput_ips": round(1000.0 / mean, 2),
+        "peak_memory_mb": round(peak["value"], 2),
+        "memory_delta_mb": round(peak["value"] - process.memory_info().rss / 1e6, 2),
+        "iterations": iterations,
+    }
+
+
+def _benchmark_llm(
+    model: Model,
+    artifact: Path,
+    cfg: dict[str, Any],
+    progress: ProgressCallback,
+) -> dict[str, Any]:
+    """LLM-aware benchmark: measures text generation (naive, no KV) instead of
+    numeric tensor inference so evaluate/radar gets real numbers for chat models."""
+    progress(80, "Running LLM text-generation benchmark (CPU)...")
+    iterations = max(int(cfg.get("iterations", 8)), 1)
+    warmup = max(int(cfg.get("warmup", 1)), 0)
+    tokens = max(int(cfg.get("llm_tokens", 6)), 1)
+    prompt = str(cfg.get("llm_prompt", "模型压缩与量化测试，请简要回答。"))
+    original_dir = Path(model.file_path) if model.file_path else None
+    result: dict[str, Any] = {}
+    if original_dir and original_dir.is_dir() and (original_dir / "config.json").is_file():
+        try:
+            result["original"] = _measure_llm_side(
+                original_dir, prompt, tokens, iterations, warmup, False
+            )
+        except Exception as exc:
+            result["original_error"] = f"{type(exc).__name__}: {exc}"[:300]
+    try:
+        result["compressed"] = _measure_llm_side(
+            artifact, prompt, tokens, iterations, warmup, True
+        )
+    except Exception as exc:
+        result["compressed_error"] = f"{type(exc).__name__}: {exc}"[:300]
+    if "original" in result and "compressed" in result:
+        a = result["original"]["latency_ms_mean"]
+        b = result["compressed"]["latency_ms_mean"]
+        if b > 0:
+            result["speedup_x"] = round(a / b, 3)
+    return result
+
+
 def run_benchmark(
     model: Model,
     artifact: Path,
@@ -1764,6 +2911,9 @@ def run_benchmark(
 ) -> dict[str, Any]:
     """Measure CPU inference latency/throughput of the original and compressed
     models. Returns a dict keyed by ``original`` / ``compressed``."""
+    if model.framework == "huggingface" and _looks_like_llm_artifact(artifact):
+        return _benchmark_llm(model, artifact, cfg, progress)
+
     import time
 
     import numpy as np
@@ -2079,10 +3229,50 @@ def _eval_perplexity(
     elif text_file:
         text = Path(text_file).read_text(encoding="utf-8")
     else:
-        raise ValueError("perplexity eval requires text_url or text_file")
+        # Lightweight, zero-dependency fallback: built-in bilingual prompts so
+        # “④ LLM Perplexity” works even without an external dataset. Results
+        # are only comparable within the same model/family (self-consistency).
+        text = (
+            "人工智能模型轻量化平台支持模型量化、剪枝与蒸馏。"
+            "LLM 压缩后仍可保持较好的生成质量与推理速度。"
+            "知识蒸馏让小型学生模型学习大型教师模型的输出分布。"
+            "OpenVINO 与 NNCF 提供了 INT4 与 INT8 的 CPU 推理优化。"
+            "The platform supports model compression, quantization, pruning, "
+            "distillation and efficient CPU inference with OpenVINO IR. "
+            "Large language models can be quantized to INT4 weights while "
+            "keeping reasonable generation quality. "
+        ) * 8
 
     model_dir = artifact if artifact.is_dir() else Path(artifact)
     tokenizer = AutoTokenizer.from_pretrained(str(model_dir))
+
+    # engine=nncf single-forward IR: compute perplexity directly through the
+    # compiled OpenVINO model (lightweight, no external dataset required).
+    if (model_dir / "engine_nncf.txt").is_file():
+        import math as _math
+
+        import numpy as np
+
+        from app.jobs.llm_runtime_nncf import NncfChatModel
+
+        runner = NncfChatModel(str(model_dir))
+        ids = np.asarray([tokenizer.encode(text)], dtype=np.int64)
+        logits = np.asarray(runner._compiled([ids, np.ones_like(ids)])[0])[0]
+        count = ids.shape[1]
+        nll = 0.0
+        for i in range(count - 1):
+            row = logits[i].astype(np.float64)
+            row = row - row.max()
+            probs = np.exp(row)
+            probs = probs / probs.sum()
+            nll += -_math.log(max(float(probs[ids[0, i + 1]]), 1e-12))
+        return {
+            "type": "perplexity",
+            "perplexity": round(_math.exp(nll / max(count - 1, 1)), 3),
+            "samples": int(count),
+            "note": "engine=nncf light eval (built-in prompts, no external dataset)",
+        }
+
     ov_model = OVModelForCausalLM.from_pretrained(
         str(model_dir), device="cpu", compile=False
     )
@@ -2107,3 +3297,622 @@ def _eval_perplexity(
     return {"perplexity": round(perplexity, 4), "chunks": len(nlls)}
 
 
+
+# ---- CPU micro LoRA SFT (pure-PyTorch XTuner-methodology prototype) -------
+class _LoraLinear(torch.nn.Module):
+    """LoRA adapter over a frozen Linear (CPU-safe, XTuner-style)."""
+
+    def __init__(self, base: torch.nn.Linear, rank: int = 8, alpha: float = 1.0) -> None:
+        super().__init__()
+        self.weight = torch.nn.Parameter(base.weight.detach().clone(), requires_grad=False)
+        self.bias = (
+            None
+            if base.bias is None
+            else torch.nn.Parameter(base.bias.detach().clone(), requires_grad=False)
+        )
+        self._r = float(max(int(rank), 1))
+        self._alpha = float(alpha)
+        a = torch.zeros(base.in_features, int(rank))
+        torch.nn.init.normal_(a, std=0.02)
+        self._lora_a = torch.nn.Parameter(a)
+        self._lora_b = torch.nn.Parameter(torch.zeros(int(rank), base.out_features))
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        import torch.nn.functional as F
+
+        y = F.linear(x, self.weight, self.bias)
+        delta = (x @ self._lora_a) @ self._lora_b
+        return y + delta * (self._alpha / self._r)
+
+
+class _MicroBlock(torch.nn.Module):
+    """Minimal causal transformer block (self-attention + MLP)."""
+
+    def __init__(self, dim: int, heads: int) -> None:
+        super().__init__()
+        assert dim % heads == 0
+        self.heads = heads
+        self.dh = dim // heads
+        self.ln1 = torch.nn.LayerNorm(dim)
+        self.q = torch.nn.Linear(dim, dim)
+        self.k = torch.nn.Linear(dim, dim)
+        self.v = torch.nn.Linear(dim, dim)
+        self.out = torch.nn.Linear(dim, dim)
+        self.ln2 = torch.nn.LayerNorm(dim)
+        self.fc1 = torch.nn.Linear(dim, dim * 4)
+        self.fc2 = torch.nn.Linear(dim * 4, dim)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        import math
+
+        B, T, C = x.shape
+        h = self.ln1(x)
+        q = self.q(h).view(B, T, self.heads, self.dh).transpose(1, 2)
+        k = self.k(h).view(B, T, self.heads, self.dh).transpose(1, 2)
+        v = self.v(h).view(B, T, self.heads, self.dh).transpose(1, 2)
+        att = (q @ k.transpose(-2, -1)) / math.sqrt(self.dh)
+        mask = torch.triu(torch.ones(T, T, dtype=torch.bool, device=x.device), diagonal=1)
+        att = att.masked_fill(mask, float("-inf"))
+        att = torch.softmax(att, dim=-1)
+        h = (att @ v).transpose(1, 2).reshape(B, T, C)
+        h = self.out(h)
+        x = x + h
+        x = x + self.fc2(torch.nn.functional.gelu(self.fc1(self.ln2(x))))
+        return x
+
+
+class _MicroGPT(torch.nn.Module):
+    """Tiny causal character LM used by the CPU LoRA SFT prototype."""
+
+    def __init__(self, vocab: int, dim: int = 48, heads: int = 4, layers: int = 3) -> None:
+        super().__init__()
+        self.block = 128
+        self.token_emb = torch.nn.Embedding(vocab, dim)
+        self.pos_emb = torch.nn.Embedding(self.block, dim)
+        self.blocks = torch.nn.ModuleList([_MicroBlock(dim, heads) for _ in range(layers)])
+        self.ln = torch.nn.LayerNorm(dim)
+        self.head = torch.nn.Linear(dim, vocab, bias=False)
+
+    def forward(self, idx: torch.Tensor) -> torch.Tensor:
+        B, T = idx.shape
+        h = self.token_emb(idx) + self.pos_emb(torch.arange(T, device=idx.device))
+        for blk in self.blocks:
+            h = blk(h)
+        return self.head(self.ln(h))
+
+
+def _lora_replace(model: torch.nn.Module, rank: int) -> int:
+    """Wrap every Linear with a LoRA adapter; base weights stay frozen."""
+
+    count = 0
+    for name, child in list(model.named_children()):
+        if isinstance(child, torch.nn.Linear):
+            setattr(model, name, _LoraLinear(child, rank=rank, alpha=float(rank)))
+            count += 1
+        else:
+            count += _lora_replace(child, rank)
+    return count
+
+def _instruction_pairs_from_files(root: Path) -> tuple[list[tuple[str, str]], str]:
+    """Parse uploaded dataset files (.csv/.tsv/.xlsx) into (q, a) instruction pairs.
+
+    Column conventions: first two populated columns are question/answer; header
+    row detection tolerates zh/en names (question|prompt|问题|指令|输入 …).
+    A single text column may also contain '问题 => 回答'. Returns pairs plus a
+    human-readable source description (used by the CPU LoRA SFT prototype).
+    """
+    import csv
+
+    files = [p for p in sorted(root.rglob("*")) if p.suffix.lower() in {".csv", ".tsv", ".xlsx", ".xls"}]
+    if not files:
+        return [], ""
+
+    q_heads = {"question", "prompt", "query", "input", "instruction", "问题", "指令", "输入", "user"}
+    a_heads = {"answer", "response", "output", "completion", "reply", "回答", "输出", "答复", "标签", "assistant"}
+    pairs: list[tuple[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+
+    def _norm(v: object) -> str:
+        return str(v or "").strip().replace(" ", "").replace("_", "").lower()
+
+    def _consume(rows: list[list[object]]) -> None:
+        q_col, a_col = 0, 1
+        for ri, row in enumerate(rows):
+            if ri == 0 and len(row) >= 2 and _norm(row[0]) in q_heads and _norm(row[1]) in a_heads:
+                continue  # header row
+            cells = [str(c).strip() for c in row if str(c).strip()]
+            if not cells:
+                continue
+            if len(cells) == 1 and "=>" in cells[0]:
+                q, a = cells[0].split("=>", 1)
+                cells = [q.strip(), a.strip()]
+            if len(cells) < 2:
+                continue
+            q, a = cells[q_col], cells[a_col]
+            if q and a and (q, a) not in seen:
+                seen.add((q, a))
+                pairs.append((q, a))
+
+    for f in files:
+        try:
+            if f.suffix.lower() in {".csv", ".tsv"}:
+                delim = "\t" if f.suffix.lower() == ".tsv" else ","
+                with f.open(newline="", encoding="utf-8-sig") as fh:
+                    _consume([row for row in csv.reader(fh, delimiter=delim)])
+            else:
+                import openpyxl
+
+                wb = openpyxl.load_workbook(str(f), read_only=True, data_only=True)
+                for ws in wb.worksheets:
+                    rows = [list(row) for row in ws.iter_rows(values_only=True)]
+                    _consume(rows)
+                wb.close()
+        except Exception:
+            continue
+    return pairs, ", ".join(x.name for x in files)
+
+
+def _lora_sft_train(
+    model: Model,
+    params: dict[str, Any],
+    out_dir: Path,
+    progress: ProgressCallback,
+) -> tuple[Any, Any, Any, Any, int, bool, Any, int, int, int, int, int, float, float, int, str]:
+    """Internal CPU micro LoRA SFT trainer (pure-PyTorch XTuner prototype).
+
+    - data: params["data"] with one "question => answer" per line (empty -> demo).
+    - method: freeze the built-in micro LM; train only LoRA A/B on every Linear,
+      autoregressive cross-entropy computed over the answer span only.
+    - outputs: adapter_lora.pt / model_lora_merged.pt / finetune_meta.json.
+    Real 7B-scale LoRA/QLoRA belongs to the GPU Worker phase II (XTuner); this
+    function is the CPU end-to-end equivalent used for smoke tests.
+    """
+    import json
+
+    import torch
+    import torch.nn as nn
+
+    epochs = max(int(params.get("epochs", 3)), 1)
+    lr = float(params.get("lr", 3e-3))
+    lora_rank = max(int(params.get("lora_rank", 8)), 2)
+    max_new = max(int(params.get("max_new", 32)), 4)
+
+    data_text = str(params.get("data") or params.get("data_text") or "").strip()
+    pairs: list[tuple[str, str]] = []
+    source_desc = ""
+    if data_text:
+        for line in data_text.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            sep = "=>" if "=>" in line else "\t"
+            if sep not in line:
+                continue
+            q, a = line.split(sep, 1)
+            if q.strip() and a.strip():
+                pairs.append((q.strip(), a.strip()))
+    demo = not data_text
+    if not pairs and (params.get("dataset_id") or params.get("data_url") or params.get("data_dir")):
+        # Excel / CSV instruction datasets (zip with xlsx/csv inside).
+        progress(13, "Resolving instruction dataset (.xlsx/.csv)...")
+        data_path = _resolve_eval_data(
+            {"type": "classification", "dataset_id": params.get("dataset_id"),
+             "data_url": params.get("data_url"), "data_dir": params.get("data_dir")},
+            out_dir / "instruct_data",
+        )
+        pairs, source_desc = _instruction_pairs_from_files(data_path)
+        demo = False
+    if not pairs and demo:
+        data_text = "\n".join(
+            [
+                "hello => hi there",
+                "what is your name? => lanius",
+                "how are you? => i am fine, thanks",
+            ]
+        )
+        for line in data_text.splitlines():
+            sep = "=>"
+            q, a = line.split(sep, 1)
+            pairs.append((q.strip(), a.strip()))
+    if not pairs:
+        raise ValueError(
+            "llm_finetune needs 'question => answer' data (data field, or a "
+            "dataset containing .csv/.tsv/.xlsx with question/answer columns)"
+        )
+
+    specials = {"<pad>": 0, "<bos>": 1, "<sep>": 2, "<eos>": 3}
+    vocab = sorted({c for q, a in pairs for c in q + a})
+    idx = {c: i + 4 for i, c in enumerate(vocab)}
+    bos, sep, eos = specials["<bos>"], specials["<sep>"], specials["<eos>"]
+
+    def _encode(text: str) -> list[int]:
+        return [bos] + [idx[c] for c in text]
+
+    samples: list[tuple[list[int], list[int], list[bool]]] = []
+    for q, a in pairs:
+        full = _encode(q) + [sep] + [idx[c] for c in a] + [eos]
+        flags = [False] * (len(_encode(q)) + 1) + [True] * (len(a) + 1)
+        samples.append((full[:-1], full[1:], flags[1:]))
+
+    progress(15, f"Building micro LM (vocab={len(vocab) + 4}, samples={len(pairs)})...")
+    torch.manual_seed(1234)
+    gpt = _MicroGPT(len(vocab) + 4)
+    for p in gpt.parameters():
+        p.requires_grad = False
+    lora_layers = _lora_replace(gpt, lora_rank)
+    trainable = [p for p in gpt.parameters() if p.requires_grad]
+    total_params = sum(p.numel() for p in gpt.parameters())
+    trainable_params = sum(p.numel() for p in trainable)
+    optim = torch.optim.Adam(trainable, lr=lr)
+
+    def _loss_step(t: int) -> float:
+        x_ids, y_ids, mask = samples[t]
+        logits = gpt(torch.tensor([x_ids]))
+        flat = logits[0].reshape(-1, logits.shape[-1])
+        per = nn.functional.cross_entropy(flat, torch.tensor(y_ids), reduction="none")
+        m = torch.tensor(mask, dtype=torch.float)
+        return (per * m).sum() / max(float(m.sum()), 1.0)
+
+    progress(30, f"LoRA layers injected: {lora_layers}; trainable={trainable_params}")
+    initial_loss = float(_loss_step(0).item())
+    last_loss = initial_loss
+    for epoch in range(epochs):
+        optim.zero_grad()
+        total = None
+        for t in range(len(pairs)):
+            loss_t = _loss_step(t)
+            total = loss_t if total is None else total + loss_t
+        total.backward()
+        optim.step()
+        last_loss = float(total.item() / len(pairs))
+        progress(
+            30 + int(60 * (epoch + 1) / epochs),
+            f"LoRA epoch {epoch + 1}/{epochs} loss={last_loss:.4f}",
+        )
+        progress(
+            70 + int(10 * (epoch + 1) / epochs),
+            f"Epoch {epoch + 1}/{epochs} avg={last_loss:.4f}",
+        )
+    gpt.eval()
+    return gpt, pairs, vocab, idx, eos, demo, samples, trainable_params, total_params, epochs, lora_rank, lora_layers, initial_loss, last_loss, max_new, data_text
+
+def llm_finetune(
+    model: Model,
+    params: dict[str, Any],
+    out_dir: Path,
+    progress: ProgressCallback,
+) -> tuple[Path, dict[str, Any]]:
+    """LoRA SFT entry point -> adapter + merged pt.
+
+    HuggingFace models (framework=huggingface) take the real transformers
+    causal-LM path (local GPU when CUDA available); otherwise the built-in CPU
+    micro-LM prototype is used so the CPU-only server stays unchanged.
+    """
+    if model.framework == "huggingface":
+        import torch as _cu
+        if not _cu.cuda.is_available():
+            raise ValueError(
+                "llm_finetune on HuggingFace models requires a CUDA runtime "
+                "(local GPU compose/venv); the CPU-only server only runs the "
+                "built-in micro prototype for PyTorch checkpoints"
+            )
+        return _hf_lora_sft(model, params, out_dir, progress)
+    import json
+    import torch
+
+    (
+        gpt,
+        pairs,
+        vocab,
+        idx,
+        eos,
+        demo,
+        samples,
+        trainable_params,
+        total_params,
+        epochs,
+        lora_rank,
+        lora_layers,
+        initial_loss,
+        last_loss,
+        max_new,
+        _data_text,
+    ) = _lora_sft_train(model, params, out_dir, progress)
+    bos = 1
+    eos_id = eos
+
+    def _generate(prompt: str, limit: int) -> str:
+        gpt.eval()
+        ids = [bos] + [idx[c] for c in prompt if c in idx]
+        with torch.no_grad():
+            for _ in range(limit):
+                if len(ids) >= gpt.block:
+                    ids = ids[-(gpt.block - 1):]
+                logits = gpt(torch.tensor([ids]))[0, -1]
+                nxt = int(torch.argmax(logits).item())
+                ids.append(nxt)
+                if nxt == eos_id:
+                    break
+        return "".join(vocab[t - 4] for t in ids if 4 <= t - 4 < len(vocab))
+
+    generated = _generate(pairs[0][0], max_new)
+    torch.save(
+        {
+            name: p.data.clone()
+            for name, p in gpt.named_parameters()
+            if p.requires_grad
+        },
+        str(out_dir / "adapter_lora.pt"),
+    )
+    torch.save(gpt.state_dict(), str(out_dir / "model_lora_merged.pt"))
+    (out_dir / "finetune_meta.json").write_text(
+        json.dumps(
+            {
+                "demo": demo,
+                "samples": len(pairs),
+                "vocab_size": gpt.token_emb.num_embeddings,
+                "lora_rank": lora_rank,
+                "lora_layers": lora_layers,
+                "trainable_params": trainable_params,
+                "total_params": total_params,
+                "epochs": epochs,
+                "initial_loss": round(initial_loss, 6),
+                "final_loss": round(last_loss, 6),
+                "prompt": pairs[0][0],
+                "generated": generated,
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    progress(95, "Done.")
+    return out_dir, {
+        "method": "llm_finetune",
+        "quant_type": "lora_sft",
+        "demo_data": demo,
+        "samples": len(pairs),
+        "vocab_size": int(gpt.token_emb.num_embeddings),
+        "lora_rank": lora_rank,
+        "lora_layers": lora_layers,
+        "trainable_params": trainable_params,
+        "total_params": total_params,
+        "epochs": epochs,
+        "epochs_completed": epochs,
+        "initial_loss": round(initial_loss, 6),
+        "final_loss": round(last_loss, 6),
+        "generated": generated,
+        "adapter_pt": "adapter_lora.pt",
+        "merged_pt": "model_lora_merged.pt",
+        "note": "CPU micro LoRA SFT prototype; 7B-scale needs GPU Worker II (XTuner)",
+    }
+
+# ---- HF (transformers) causal-LM LoRA SFT (GPU-capable, local GPU path) ----
+class _HfLoraLayer(torch.nn.Module):
+    """LoRA adapter wrapping an nn.Linear or transformers Conv1D (frozen base)."""
+
+    def __init__(self, base: torch.nn.Module, rank: int) -> None:
+        super().__init__()
+        self._base = base
+        self._is_hf_lora = True
+        for p in base.parameters():
+            p.requires_grad = False
+        w = base.weight.detach()
+        if isinstance(base, torch.nn.Linear):
+            in_f, out_f = w.shape[1], w.shape[0]
+        else:  # transformers Conv1D: weight layout (in, out)
+            in_f, out_f = w.shape[0], w.shape[1]
+        a = torch.zeros(in_f, int(rank), device=w.device, dtype=w.dtype)
+        torch.nn.init.normal_(a, std=0.02)
+        self._lora_a = torch.nn.Parameter(a)
+        self._lora_b = torch.nn.Parameter(torch.zeros(int(rank), out_f, device=w.device, dtype=w.dtype))
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        y = self._base(x)
+        return y + ((x @ self._lora_a) @ self._lora_b)
+
+
+def _hf_lora_wrap(model: torch.nn.Module, rank: int, in_out: tuple[int, int]) -> int:
+    """Wrap attention/MLP Linear + Conv1D (skip head/embedding/tied lm_head)."""
+
+    skip_classes = {"Embedding", "RMSNorm", "LayerNorm", "GPT2LMHeadModel"}
+    count = 0
+
+    def _rec(m: torch.nn.Module, prefix: str) -> None:
+        nonlocal count
+        for name, child in list(m.named_children()):
+            cname = type(child).__name__
+            if cname in {"Linear", "Conv1D", "NonDynamicallyQuantizableLinear"} and name not in {"lm_head", "wte", "wpe"}:
+                in_f, out_f = in_out
+                ok = False
+                if cname == "Conv1D" or (hasattr(child, "weight") and len(child.weight.shape) == 2):
+                    w = child.weight
+                    a_in = w.shape[0] if cname == "Conv1D" else w.shape[1]
+                    b_out = w.shape[1] if cname == "Conv1D" else w.shape[0]
+                    if 2 <= a_in <= in_f and 2 <= b_out <= out_f:
+                        ok = True
+                if ok:
+                    setattr(m, name, _HfLoraLayer(child, rank))
+                    count += 1
+                    continue
+            if not getattr(child, "_is_hf_lora", False) and cname not in skip_classes:
+                _rec(child, f"{prefix}.{name}")
+
+    _rec(model, "")
+    return count
+
+
+def _hf_lora_unwrap(model: torch.nn.Module) -> int:
+    """Bake LoRA deltas into base weights then restore original module names."""
+
+    import torch
+
+    n = 0
+    for name, child in list(model.named_children()):
+        if isinstance(child, _HfLoraLayer):
+            base = child._base
+            a, b = child._lora_a.data, child._lora_b.data
+            delta = (a @ b).data  # (in, out)
+            if isinstance(base, torch.nn.Linear):
+                base.weight.data = base.weight.data + delta.t()
+            else:
+                base.weight.data = base.weight.data + delta
+            setattr(model, name, base)
+            n += 1
+        else:
+            n += _hf_lora_unwrap(child)
+    return n
+
+def _hf_lora_sft(
+    model: Model,
+    params: dict[str, Any],
+    out_dir: Path,
+    progress: ProgressCallback,
+) -> tuple[Path, dict[str, Any]]:
+    """Real HF causal-LM LoRA SFT (GPU path when torch.cuda is available).
+
+    Model source: a local HF directory (``model.file_path``) or a repo id
+    (``model.source_url`` / params["model_repo"]). Data follows the same
+    conventions as the CPU micro trainer (data field / instruction datasets).
+    Outputs: adapter_lora.pt, model_lora_merged.pt, finetune_meta.json.
+    """
+    import json
+
+    import torch
+    from transformers import AutoModelForCausalLM, AutoTokenizer
+
+    base_dir = None
+    if model.file_path and Path(model.file_path).is_dir():
+        base_dir = Path(model.file_path)
+    elif model.file_path and (Path(model.file_path) / "config.json").exists():
+        base_dir = Path(model.file_path)
+    repo = str(params.get("model_repo") or "")
+    if base_dir is None and not repo:
+        src = (getattr(model, "source_url", "") or "").strip()
+        repo = src if src and "://" not in src else src
+    if base_dir is None and not repo:
+        raise ValueError("HF LoRA SFT needs a local HF dir or a HuggingFace repo id")
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    dtype = torch.float16 if device.type == "cuda" else torch.float32
+    progress(10, f"Loading HF causal LM on {device} (tiny-model smoke recommended)...")
+    source = str(base_dir) if base_dir is not None else repo
+    tok = AutoTokenizer.from_pretrained(source, trust_remote_code=True)
+    base = AutoModelForCausalLM.from_pretrained(source, trust_remote_code=True)
+    if getattr(tok, "pad_token_id", None) is None:
+        tok.pad_token = tok.eos_token
+    base.to(device)
+    dim = int(getattr(base.config, "hidden_size", 768))
+
+    # ---- instruction pairs (same grammar as the CPU prototype) ------------
+    data_text = str(params.get("data") or params.get("data_text") or "").strip()
+    pairs: list[tuple[str, str]] = []
+    if data_text:
+        for line in data_text.splitlines():
+            if not line.strip() or "=>" not in line:
+                continue
+            q, a = line.split("=>", 1)
+            if q.strip() and a.strip():
+                pairs.append((q.strip(), a.strip()))
+    demo = False
+    if not pairs and (params.get("dataset_id") or params.get("data_url") or params.get("data_dir")):
+        dpath = _resolve_eval_data(
+            {"type": "classification", "dataset_id": params.get("dataset_id"),
+             "data_url": params.get("data_url"), "data_dir": params.get("data_dir")},
+            out_dir / "instruct_data",
+        )
+        pairs, _ = _instruction_pairs_from_files(dpath)
+    if not pairs:
+        pairs = [("hello", "hi there"), ("what is your name?", "lanius")]
+        demo = True
+
+    max_len = max(int(params.get("hf_max_len", 128)), 16)
+    enc = []
+    for q, a in pairs:
+        qids = tok.encode(q, add_special_tokens=False)[: max_len // 2]
+        aids = tok.encode(a, add_special_tokens=False)[: max_len // 2]
+        eos = [tok.eos_token_id] if tok.eos_token_id is not None else []
+        ids = qids + aids + eos
+        ids = ids[:max_len]
+        labels = [-100] * len(qids) + ids[len(qids):]
+        enc.append((ids, labels))
+    if not enc:
+        raise ValueError("No trainable instruction samples")
+
+    # ---- inject LoRA into attention/MLP projection layers -----------------
+    epochs = max(int(params.get("epochs", 2)), 1)
+    lr = float(params.get("lr", 3e-4))
+    lora_rank = max(int(params.get("lora_rank", 8)), 2)
+    for p in base.parameters():
+        p.requires_grad = False
+    wrapped = _hf_lora_wrap(base, lora_rank, (dim * 4, dim * 4))
+    if not wrapped:
+        raise ValueError("No compatible Linear/Conv1D found for HF LoRA injection")
+    trainable = [p for p in base.parameters() if p.requires_grad]
+    trainable_params = sum(p.numel() for p in trainable)
+    optim = torch.optim.Adam(trainable, lr=lr)
+    base.train()
+
+    def _loss_step(sample_idx: int) -> torch.Tensor:
+        ids, labels = enc[sample_idx]
+        tin = torch.tensor([ids], device=device)
+        tgt = torch.tensor([labels], device=device)
+        out = base(input_ids=tin, labels=tgt)
+        return out.loss
+
+    progress(35, f"HF LoRA layers={wrapped} trainable={trainable_params} on {device.type}")
+    initial_loss = float(_loss_step(0).item())
+    last_loss = initial_loss
+    steps = epochs * len(enc)
+    for epoch in range(epochs):
+        epoch_loss = 0.0
+        for t in range(len(enc)):
+            optim.zero_grad()
+            loss = _loss_step(t)
+            loss.backward()
+            optim.step()
+            last_loss = float(loss.item())
+            epoch_loss += last_loss
+            progress(
+                35 + int(55 * (epoch * len(enc) + t + 1) / steps),
+                f"HF LoRA epoch {epoch + 1}/{epochs} loss={last_loss:.4f}",
+            )
+    base.eval()
+
+    # ---- artifacts: adapter + merged (canonical state dict) ---------------
+    adapter = {
+        name: p.data.clone().cpu()
+        for name, p in base.named_parameters()
+        if p.requires_grad
+    }
+    torch.save(adapter, str(out_dir / "adapter_lora.pt"))
+    with torch.no_grad():
+        _hf_lora_unwrap(base)
+    torch.save(base.state_dict(), str(out_dir / "model_lora_merged.pt"))
+
+    qids = tok.encode(pairs[0][0], add_special_tokens=False)[:32]
+    gen_ids = list(qids)
+    with torch.no_grad():
+        for _ in range(min(32, max_len)):
+            g = base(input_ids=torch.tensor([gen_ids[-max_len:]], device=device))
+            nxt = int(g.logits[0, -1].argmax().item())
+            gen_ids.append(nxt)
+            if nxt == tok.eos_token_id:
+                break
+    generated = tok.decode(gen_ids, skip_special_tokens=True)
+    (out_dir / "finetune_meta.json").write_text(
+        json.dumps({"demo": demo, "device": device.type, "hf_layers": wrapped,
+                     "initial_loss": round(initial_loss, 6),
+                     "final_loss": round(last_loss, 6), "generated": generated},
+                    ensure_ascii=False, indent=2), encoding="utf-8")
+    progress(95, "Done.")
+    return out_dir, {
+        "method": "llm_finetune", "quant_type": "lora_sft",
+        "device": device.type, "hf_lora_layers": wrapped,
+        "model_repo": repo or str(base_dir), "samples": len(pairs), "demo_data": demo,
+        "lora_rank": lora_rank, "trainable_params": trainable_params,
+        "epochs": epochs, "initial_loss": round(initial_loss, 6),
+        "final_loss": round(last_loss, 6), "generated": generated,
+        "adapter_pt": "adapter_lora.pt", "merged_pt": "model_lora_merged.pt",
+        "note": "HF LoRA SFT (local GPU path); CPU-only server keeps micro prototype",
+    }

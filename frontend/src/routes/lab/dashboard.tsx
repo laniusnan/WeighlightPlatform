@@ -22,7 +22,7 @@ import {
 import { useI18n } from "@/components/lab/i18n"
 import { Card, Pill, ProgressBar, StatCard } from "@/components/lab/ui"
 import { usePolling } from "@/hooks/usePolling"
-import { apiListTasks, apiPlatformStatus, apiWorkers } from "@/services/api"
+import { apiFetchAllModels, apiListDatasets, apiListTasks, apiPlatformStatus, apiWorkers } from "@/services/api"
 import { formatBytes, formatUptime } from "@/services/format"
 
 export const Route = createFileRoute("/lab/dashboard")({
@@ -36,18 +36,22 @@ interface Snapshot {
   status: Awaited<ReturnType<typeof apiPlatformStatus>>
   workers: Awaited<ReturnType<typeof apiWorkers>>
   tasks: Awaited<ReturnType<typeof apiListTasks>>
+  ownModels: Awaited<ReturnType<typeof apiFetchAllModels>>
+  ownDatasets: Awaited<ReturnType<typeof apiListDatasets>>
 }
 
 function DashboardPage() {
   const { t } = useI18n()
   const { data, error } = usePolling<Snapshot>(
     async () => {
-      const [status, workers, tasks] = await Promise.all([
+      const [status, workers, tasks, ownModels, ownDatasets] = await Promise.all([
         apiPlatformStatus(),
         apiWorkers(),
         apiListTasks({ limit: 200 }),
+        apiFetchAllModels(),
+        apiListDatasets(500),
       ])
-      return { status, workers, tasks }
+      return { status, workers, tasks, ownModels, ownDatasets }
     },
     [],
     { intervalMs: 5000 },
@@ -56,6 +60,12 @@ function DashboardPage() {
   const status = data?.status
   const workers = data?.workers
   const tasks = data?.tasks
+  // “我的”维度：与模型/压缩/数据集模块一致（非管理员只看自己的）。
+  const ownModels = data?.ownModels?.data ?? []
+  const ownDatasets = data?.ownDatasets?.data ?? []
+  const ownStorageBytes =
+    ownModels.reduce((sum, m) => sum + (m.size_bytes ?? 0), 0) +
+    ownDatasets.reduce((sum, d) => sum + (d.size_bytes ?? 0), 0)
 
   const activeTasks = (tasks?.data ?? []).filter((task) =>
     ["pending", "running"].includes(task.status),
@@ -97,11 +107,21 @@ function DashboardPage() {
       )}
 
       <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5">
-        <StatCard label={t("模型总量", "Models")} value={String(status?.models ?? 0)} icon={<Boxes size={17} />} hint={t("已注册模型", "Registered models")} />
-        <StatCard label={t("数据集总量", "Datasets")} value={String(status?.datasets ?? 0)} icon={<Database size={17} />} hint={t("校准 / 评估数据集", "Calibration / eval data")} />
-        <StatCard label={t("存储占用", "Storage")} value={formatBytes(status?.storage_bytes ?? 0)} icon={<HardDrive size={17} />} hint={t("模型 + 数据集", "Models + datasets")} />
-        <StatCard label={t("Worker 数", "Workers")} value={String(workers?.worker_count ?? 0)} icon={<Server size={17} />} hint={t("在线任务执行器", "Online workers")} />
-        <StatCard label={t("队列深度", "Queue depth")} value={String(workers?.queue_depth ?? 0)} icon={<Timer size={17} />} hint={t("排队等待的任务", "Queued tasks")} />
+        <Link to="/lab/models" search={{}} className="block cursor-pointer rounded-xl transition hover:opacity-80">
+          <StatCard label={t("模型总量", "Models")} value={String(ownModels.length)} icon={<Boxes size={17} />} hint={t("我的已注册模型 · 点击进入模型管理", "My models · click to open Models")} />
+        </Link>
+        <Link to="/lab/models" search={{}} className="block cursor-pointer rounded-xl transition hover:opacity-80">
+          <StatCard label={t("数据集总量", "Datasets")} value={String(ownDatasets.length)} icon={<Database size={17} />} hint={t("我的数据集 · 点击进入数据管理", "My datasets · click to open data management")} />
+        </Link>
+        <Link to="/lab/models" search={{}} className="block cursor-pointer rounded-xl transition hover:opacity-80">
+          <StatCard label={t("存储占用", "Storage")} value={formatBytes(ownStorageBytes)} icon={<HardDrive size={17} />} hint={t("我的模型 + 数据集 · 点击进入数据管理", "My models + datasets · click to open data")} />
+        </Link>
+        <Link to="/lab/compressions" search={{}} className="block cursor-pointer rounded-xl transition hover:opacity-80">
+          <StatCard label={t("Worker 数", "Workers")} value={String(workers?.worker_count ?? 0)} icon={<Server size={17} />} hint={t("在线任务执行器 · 点击进入压缩任务", "Online workers · click to open tasks")} />
+        </Link>
+        <Link to="/lab/compressions" search={{}} className="block cursor-pointer rounded-xl transition hover:opacity-80">
+          <StatCard label={t("队列深度", "Queue depth")} value={String(workers?.queue_depth ?? 0)} icon={<Timer size={17} />} hint={t("排队任务 · 点击进入压缩任务", "Queued · click to open tasks")} />
+        </Link>
       </div>
 
       <Card className="p-6">
@@ -116,6 +136,9 @@ function DashboardPage() {
               {t("活跃", "active")} {activeTasks.length}
             </p>
           </div>
+          <Link to="/lab/compressions" search={{}} className="text-[13px] font-medium text-[var(--lb-primary)] hover:underline">
+            {t("任务列表 →", "Tasks →")}
+          </Link>
           {activeTasks.length > 0 && (
             <div className="flex items-center gap-3">
               <div className="w-44">

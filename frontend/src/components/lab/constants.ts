@@ -51,9 +51,15 @@ export const METHOD_META: MethodMeta[] = [
   },
   {
     value: "prune",
-    label: "L2 结构化剪枝",
-    description: "按 L2 范数剪除卷积滤波器",
+    label: "结构化剪枝",
+    description: "L1 / L2 / BN-Slim 滤波器剪枝",
     group: "剪枝 / 稀疏化",
+  },
+  {
+    value: "distill",
+    label: "知识蒸馏",
+    description: "教师模型 → width_mult 学生（KD 损失）",
+    group: "训练后校准",
   },
   {
     value: "sparsify",
@@ -64,7 +70,13 @@ export const METHOD_META: MethodMeta[] = [
   {
     value: "qat",
     label: "量化感知训练 QAT",
-    description: "FX QAT 微调后导出量化 ONNX",
+    description: "FX QAT / LSQ 微调后导出量化 ONNX",
+    group: "训练后校准",
+  },
+  {
+    value: "llm_finetune",
+    label: "LoRA 微调（原型）",
+    description: "CPU 微型字符 LM LoRA SFT；大模型需 GPU 二期",
     group: "训练后校准",
   },
 ]
@@ -104,9 +116,11 @@ export const METHOD_LABEL_EN: Record<CompressionMethod, string> = {
   quantize_onnx_static: "ONNX Static INT8",
   openvino_int8: "OpenVINO Convert",
   llm_quantize: "LLM INT4/INT8",
-  prune: "L2 Structured Prune",
+  prune: "Structured Prune",
+  distill: "Knowledge Distill",
   sparsify: "Weight Sparsify",
   qat: "QAT",
+  llm_finetune: "LoRA SFT (prototype)",
 }
 
 export const METHOD_DESC_EN: Record<CompressionMethod, string> = {
@@ -116,9 +130,11 @@ export const METHOD_DESC_EN: Record<CompressionMethod, string> = {
   quantize_onnx_static: "QDQ static INT8, requires calibration",
   openvino_int8: "OpenVINO IR + NNCF INT8 / FP16",
   llm_quantize: "HuggingFace LLM to OpenVINO IR",
-  prune: "Prune conv filters by L2 norm",
+  prune: "Structured filter pruning (L1 / L2 / BN-Slim)",
+  distill: "Frozen teacher distills logits to a width_mult student",
   sparsify: "Zero smallest weights by magnitude",
-  qat: "FX QAT fine-tune then export",
+  qat: "FX QAT / LSQ fine-tune then export",
+  llm_finetune: "CPU micro LoRA SFT; 7B-scale needs GPU phase II",
 }
 
 export const TASK_STATUS_LABEL_EN: Record<TaskStatus, string> = {

@@ -6,6 +6,7 @@ import { createFileRoute, useNavigate } from "@tanstack/react-router"
 import {
   Download,
   FlaskConical,
+  MessageSquare,
   PlusCircle,
   RefreshCw,
   RotateCcw,
@@ -20,6 +21,7 @@ import {
   methodLabel,
   taskStatusLabel,
 } from "@/components/lab/constants"
+import { ChatModal } from "@/components/lab/ChatModal"
 import { useI18n } from "@/components/lab/i18n"
 import {
   Button,
@@ -65,11 +67,13 @@ interface ParamDef {
   labelEn: string
   placeholder?: string
   default?: string
+  kind?: "text" | "select"
+  options?: { value: string; labelZh: string; labelEn: string }[]
 }
 
 const METHOD_PARAMS: Record<CompressionMethod, ParamDef[]> = {
   export_onnx: [
-    { key: "model_kind", labelZh: "模型类型", labelEn: "Model kind", placeholder: "cnn / yolo / pointnet", default: "cnn" },
+    { key: "model_kind", labelZh: "模型类型", labelEn: "Model kind", kind: "select", default: "cnn", options: [{ value: "cnn", labelZh: "CNN 图像分类", labelEn: "CNN image classifier" }, { value: "yolo", labelZh: "YOLO 检测", labelEn: "YOLO detector" }, { value: "pointnet", labelZh: "PointNet 点云", labelEn: "PointNet point cloud" }] },
     { key: "input_shape", labelZh: "输入形状", labelEn: "Input shape", placeholder: "1,3,224,224", default: "1,3,224,224" },
     { key: "opset", labelZh: "ONNX opset", labelEn: "ONNX opset", placeholder: "12", default: "12" },
   ],
@@ -80,27 +84,56 @@ const METHOD_PARAMS: Record<CompressionMethod, ParamDef[]> = {
     { key: "input_shape", labelZh: "输入形状", labelEn: "Input shape", placeholder: "1,3,224,224", default: "1,3,224,224" },
   ],
   openvino_int8: [
-    { key: "precision", labelZh: "精度", labelEn: "Precision", placeholder: "int8 / fp16 / fp32", default: "int8" },
-    { key: "model_kind", labelZh: "模型类型", labelEn: "Model kind", placeholder: "cnn / yolo", default: "cnn" },
+    { key: "precision", labelZh: "精度", labelEn: "Precision", kind: "select", default: "int8", options: [{ value: "int8", labelZh: "INT8 定点", labelEn: "INT8" }, { value: "fp16", labelZh: "FP16 半精度", labelEn: "FP16" }, { value: "fp32", labelZh: "FP32 单精度", labelEn: "FP32" }] },
+    { key: "model_kind", labelZh: "模型类型", labelEn: "Model kind", kind: "select", default: "cnn", options: [{ value: "cnn", labelZh: "CNN 图像分类", labelEn: "CNN image classifier" }, { value: "yolo", labelZh: "YOLO 检测", labelEn: "YOLO detector" }] },
     { key: "input_shape", labelZh: "输入形状", labelEn: "Input shape", placeholder: "1,3,224,224", default: "1,3,224,224" },
   ],
   prune: [
+    { key: "algorithm", labelZh: "剪枝准则", labelEn: "Prune criterion", kind: "select", default: "l2", options: [{ value: "l1", labelZh: "L1 范数剪枝", labelEn: "L1 norm" }, { value: "l2", labelZh: "L2 范数剪枝", labelEn: "L2 norm" }, { value: "bnslim", labelZh: "BN-Slim（γ 因子）", labelEn: "BN-Slim (gamma)" }, { value: "group_fisher", labelZh: "Group Fisher（需数据集）", labelEn: "Group Fisher (needs data)" }, { value: "autoslim", labelZh: "AutoSlim（稀疏训练 + γ 剪，需数据集）", labelEn: "AutoSlim (needs data)" }, { value: "dmcp", labelZh: "DMCP（一阶 Taylor 掩码，需数据集）", labelEn: "DMCP (needs data)" }] },
     { key: "rate", labelZh: "剪枝比例 (0~1)", labelEn: "Prune ratio (0~1)", placeholder: "0.3", default: "0.3" },
     { key: "input_shape", labelZh: "输入形状", labelEn: "Input shape", placeholder: "1,3,224,224", default: "1,3,224,224" },
   ],
   sparsify: [
+    { key: "strategy", labelZh: "稀疏策略", labelEn: "Sparsity strategy", kind: "select", default: "uniform", options: [{ value: "uniform", labelZh: "均匀（每层相同比例）", labelEn: "Uniform per layer" }, { value: "global", labelZh: "全局（整体阈值）", labelEn: "Global threshold" }] },
     { key: "rate", labelZh: "稀疏比例 (0~1)", labelEn: "Sparsity ratio (0~1)", placeholder: "0.3", default: "0.3" },
     { key: "input_shape", labelZh: "输入形状", labelEn: "Input shape", placeholder: "1,3,224,224", default: "1,3,224,224" },
   ],
+  distill: [
+    { key: "method", labelZh: "蒸馏方式", labelEn: "Distill method", kind: "select", default: "logits", options: [{ value: "logits", labelZh: "软标签 logits KD（Hinton）", labelEn: "Logits KD (Hinton)" }, { value: "features", labelZh: "FitNets 特征层对齐", labelEn: "FitNets (feature alignment)" }] },
+    { key: "width_mult", labelZh: "宽度因子", labelEn: "Width multiplier", placeholder: "0.5", default: "0.5" },
+    { key: "alpha", labelZh: "蒸馏权重 α", labelEn: "KD weight α", placeholder: "0.7", default: "0.7" },
+    { key: "temperature", labelZh: "温度 T", labelEn: "Temperature T", placeholder: "4", default: "4" },
+    { key: "epochs", labelZh: "训练轮数", labelEn: "Epochs", placeholder: "5", default: "5" },
+    { key: "lr", labelZh: "学习率", labelEn: "Learning rate", placeholder: "1e-3", default: "1e-3" },
+    { key: "batch_size", labelZh: "批次大小", labelEn: "Batch size", placeholder: "8", default: "8" },
+    { key: "image_size", labelZh: "图像尺寸", labelEn: "Image size", placeholder: "224", default: "224" },
+    { key: "input_shape", labelZh: "输入形状", labelEn: "Input shape", placeholder: "1,3,224,224", default: "1,3,224,224" },
+  ],
   qat: [
+    { key: "scheme", labelZh: "训练方案", labelEn: "Scheme", kind: "select", default: "fx", options: [{ value: "fx", labelZh: "FX 量化感知训练", labelEn: "FX QAT" }, { value: "lsq", labelZh: "LSQ（可学习步长 → 全 INT8 QDQ）", labelEn: "LSQ (learnable step, full INT8 QDQ)" }] },
+    { key: "lsq_bits", labelZh: "LSQ 位宽", labelEn: "LSQ bits", placeholder: "8", default: "8" },
+    { key: "weight_mode", labelZh: "权重量化模式", labelEn: "Weight mode", kind: "select", default: "per_channel", options: [{ value: "per_channel", labelZh: "按通道（per-channel）", labelEn: "Per-channel" }, { value: "per_tensor", labelZh: "按张量（per-tensor）", labelEn: "Per-tensor" }] },
+    { key: "weight_symmetric", labelZh: "权重对称量化", labelEn: "Weight symmetric", kind: "select", default: "true", options: [{ value: "true", labelZh: "对称（symmetric）", labelEn: "Symmetric" }, { value: "false", labelZh: "非对称（asymmetric）", labelEn: "Asymmetric" }] },
     { key: "epochs", labelZh: "训练轮数", labelEn: "Epochs", placeholder: "3", default: "3" },
     { key: "lr", labelZh: "学习率", labelEn: "Learning rate", placeholder: "1e-4", default: "1e-4" },
     { key: "patience", labelZh: "早停耐心", labelEn: "Early stop patience", placeholder: "2", default: "2" },
-    { key: "lr_schedule", labelZh: "学习率调度", labelEn: "LR schedule", placeholder: "cosine", default: "cosine" },
+    { key: "lr_schedule", labelZh: "学习率调度", labelEn: "LR schedule", kind: "select", default: "cosine", options: [{ value: "cosine", labelZh: "余弦退火", labelEn: "Cosine annealing" }, { value: "step", labelZh: "阶梯下降", labelEn: "Step decay" }] },
     { key: "input_shape", labelZh: "输入形状", labelEn: "Input shape", placeholder: "1,3,224,224", default: "1,3,224,224" },
   ],
-  export_gguf: [{ key: "outtype", labelZh: "输出类型", labelEn: "Output type", placeholder: "f16 / bf16 / q8_0", default: "f16" }],
-  llm_quantize: [{ key: "bits", labelZh: "量化位宽", labelEn: "Bits", placeholder: "4 / 8", default: "4" }],
+  llm_finetune: [
+    { key: "data", labelZh: "微调数据（每行 问题 => 回答；留空用内置演示）", labelEn: "SFT data ('q => a' per line; empty = demo)", placeholder: "hello => hi there" },
+    { key: "epochs", labelZh: "训练轮数", labelEn: "Epochs", placeholder: "24", default: "24" },
+    { key: "lr", labelZh: "学习率", labelEn: "Learning rate", placeholder: "2e-3", default: "2e-3" },
+    { key: "lora_rank", labelZh: "LoRA rank", labelEn: "LoRA rank", placeholder: "8", default: "8" },
+    { key: "max_new", labelZh: "采样生成长度", labelEn: "Max generated tokens", placeholder: "32", default: "32" },
+  ],
+  export_gguf: [{ key: "outtype", labelZh: "输出类型", labelEn: "Output type", kind: "select", default: "f16", options: [{ value: "f16", labelZh: "FP16", labelEn: "FP16" }, { value: "bf16", labelZh: "BF16", labelEn: "BF16" }, { value: "q8_0", labelZh: "INT8 量化 (q8_0)", labelEn: "INT8 q8_0" }, { value: "q4_0", labelZh: "INT4 量化 (q4_0)", labelEn: "INT4 q4_0" }] }],
+  llm_quantize: [
+    { key: "engine", labelZh: "导出引擎", labelEn: "Engine", kind: "select", default: "auto", options: [{ value: "auto", labelZh: "自动（本地 HF 目录用 nncf）", labelEn: "Auto (nncf for local dirs)" }, { value: "nncf", labelZh: "NNCF 纯路径", labelEn: "NNCF only" }, { value: "optimum", labelZh: "optimum-intel", labelEn: "optimum-intel" }] },
+    { key: "bits", labelZh: "量化位宽", labelEn: "Bits", kind: "select", default: "4", options: [{ value: "4", labelZh: "INT4", labelEn: "INT4" }, { value: "8", labelZh: "INT8", labelEn: "INT8" }] },
+    { key: "group_size", labelZh: "分组大小（RTN group-wise）", labelEn: "Group size (RTN)", kind: "select", default: "128", options: [{ value: "32", labelZh: "32", labelEn: "32" }, { value: "64", labelZh: "64", labelEn: "64" }, { value: "128", labelZh: "128（推荐）", labelEn: "128 (recommended)" }, { value: "256", labelZh: "256", labelEn: "256" }] },
+    { key: "sym", labelZh: "对称量化", labelEn: "Symmetric", kind: "select", default: "true", options: [{ value: "true", labelZh: "对称（SYM）", labelEn: "Symmetric" }, { value: "false", labelZh: "非对称（ASYM）", labelEn: "Asymmetric" }] },
+  ],
 }
 
 const EVAL_TYPES = [
@@ -166,10 +199,14 @@ function TaskWizard({
       if (method === "quantize_onnx_static" && calibDatasetId) {
         params.calib_dataset_id = calibDatasetId
       }
-      if (method === "qat") {
+      if (method === "qat" || method === "distill") {
         if (!qatDatasetId) {
           setBusy(false)
-          setError(t("QAT 需要选择一个微调数据集（按类别文件夹结构）", "QAT requires a fine-tune dataset (class folders)"))
+          setError(
+            method === "qat"
+              ? t("QAT 需要选择一个微调数据集（按类别文件夹结构）", "QAT requires a fine-tune dataset (class folders)")
+              : t("知识蒸馏需要选择训练数据集（按类别文件夹结构）", "Distillation requires a training dataset (class folders)"),
+          )
           return
         }
         params.dataset_id = qatDatasetId
@@ -182,6 +219,17 @@ function TaskWizard({
           evalCfg.image_size = Number.parseInt(evalImageSize, 10) || 224
         }
         params.eval = evalCfg
+      }
+      if (method === "llm_finetune" && qatDatasetId) {
+        params.dataset_id = qatDatasetId
+      }
+      if (method === "prune" && (paramValues.algorithm ?? "l2") === "group_fisher") {
+        if (!calibDatasetId) {
+          setBusy(false)
+          setError(t("Group Fisher 需要先选择平台数据集（图片按类别分文件夹）", "Group Fisher needs a platform dataset (class folders)"))
+          return
+        }
+        params.dataset_id = calibDatasetId
       }
       if (benchmarkOn) {
         params.benchmark = {
@@ -224,7 +272,10 @@ function TaskWizard({
           </div>
         )}
 
-        <SelectField label={t("① 选择模型", "1. Model")} value={modelId} onChange={(e) => setModelId(e.target.value)}>
+        <p className="text-[13px] font-semibold text-[var(--lb-text-2)]">
+          {t("① 选择模型", "1. Choose model")}
+        </p>
+        <SelectField label="" value={modelId} onChange={(e) => setModelId(e.target.value)}>
           <option value="">{t("选择要压缩的模型", "Choose a model")}</option>
           {readyModels.map((m) => (
             <option key={m.id} value={m.id}>{m.name} · {m.framework}</option>
@@ -232,7 +283,9 @@ function TaskWizard({
         </SelectField>
 
         <div>
-          <span className="lb-label">{t("② 压缩方法", "2. Method")}</span>
+          <p className="text-[13px] font-semibold text-[var(--lb-text-2)]">
+            {t("② 压缩方法", "2. Compression method")}
+          </p>
           <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
             {METHOD_META.map((m) => {
               const selected = m.value === method
@@ -257,24 +310,43 @@ function TaskWizard({
           </div>
         </div>
 
-        {METHOD_PARAMS[method].length > 0 && (
+        <p className="text-[13px] font-semibold text-[var(--lb-text-2)]">
+          {t("③ 方法参数", "3. Method parameters")}
+        </p>
+        {METHOD_PARAMS[method].length === 0 ? (
+          <p className="lb-muted text-[13px]">
+            {t("该压缩方法无需额外参数。", "No extra parameters for this method.")}
+          </p>
+        ) : (
           <div className="grid gap-3 rounded-lg border border-[var(--lb-border)] bg-[var(--lb-surface-2)] p-4 sm:grid-cols-2">
-            <p className="lb-muted col-span-full text-xs font-semibold">{t("参数", "Parameters")}</p>
-            {METHOD_PARAMS[method].map((param) => (
-              <TextField
-                key={param.key}
-                label={t(param.labelZh, param.labelEn)}
-                placeholder={param.placeholder ?? param.default ?? ""}
-                value={paramValues[param.key] ?? param.default ?? ""}
-                onChange={(e) => setParam(param.key, e.target.value)}
-              />
-            ))}
+            {METHOD_PARAMS[method].map((param) =>
+              param.kind === "select" && param.options ? (
+                <SelectField
+                  key={param.key}
+                  label={t(param.labelZh, param.labelEn)}
+                  value={paramValues[param.key] ?? param.default ?? ""}
+                  onChange={(e) => setParam(param.key, e.target.value)}
+                >
+                  {param.options.map((opt) => (
+                    <option key={opt.value} value={opt.value}>{t(opt.labelZh, opt.labelEn)}</option>
+                  ))}
+                </SelectField>
+              ) : (
+                <TextField
+                  key={param.key}
+                  label={t(param.labelZh, param.labelEn)}
+                  placeholder={param.placeholder ?? param.default ?? ""}
+                  value={paramValues[param.key] ?? param.default ?? ""}
+                  onChange={(e) => setParam(param.key, e.target.value)}
+                />
+              ),
+            )}
           </div>
         )}
 
-        {method === "quantize_onnx_static" && (
+        {(method === "quantize_onnx_static" || (method === "prune" && (paramValues.algorithm ?? "l2") === "group_fisher")) && (
           <SelectField
-            label={t("校准数据集（平台数据集，可选）", "Calibration dataset (optional)")}
+            label={t("数据集（校准 / Group Fisher 需要）", "Dataset (calibration / Group Fisher)")}
             value={calibDatasetId}
             onChange={(e) => setCalibDatasetId(e.target.value)}
             hint={t("需为 zip/tar 图片包（Excel 等其它类型无法参与量化校准）", "Needs zip/tar images; other file types cannot calibrate" )}
@@ -293,6 +365,32 @@ function TaskWizard({
             hint={t("需为按类别组织的 zip/tar 图片包；Excel 无法作为 QAT 训练集", "Needs class-organised zip/tar images" )}
           >
             <option value="">{t("选择微调数据集", "Choose dataset")}</option>
+            {datasets.map((d) => (
+              <option key={d.id} value={d.id}>{d.name}（{formatBytes(d.size_bytes)}）</option>
+            ))}
+          </SelectField>
+        )}
+        {method === "llm_finetune" && (
+          <SelectField
+            label={t("指令集数据集（可选；.csv/.tsv/.xlsx 前两列=问题/回答）", "Instruction dataset (optional; .csv/.xlsx, first two cols = q/a)")}
+            value={qatDatasetId}
+            onChange={(e) => setQatDatasetId(e.target.value)}
+            hint={t("留空则使用 data 文本框；两者皆空走内置演示", "Empty = use data text / demo")}
+          >
+            <option value="">{t("不使用（用 data 文本框或演示）", "None (use data text / demo)")}</option>
+            {datasets.map((d) => (
+              <option key={d.id} value={d.id}>{d.name}（{formatBytes(d.size_bytes)}）</option>
+            ))}
+          </SelectField>
+        )}
+        {method === "distill" && (
+          <SelectField
+            label={t("蒸馏训练数据集（必选，按类别文件夹结构）", "Distill dataset (required, class folders)")}
+            value={qatDatasetId}
+            onChange={(e) => setQatDatasetId(e.target.value)}
+            hint={t("学生模型会从教师 logits 中学习该数据集", "Student learns from teacher logits on this dataset")}
+          >
+            <option value="">{t("选择训练数据集", "Choose dataset")}</option>
             {datasets.map((d) => (
               <option key={d.id} value={d.id}>{d.name}（{formatBytes(d.size_bytes)}）</option>
             ))}
@@ -332,15 +430,17 @@ function TaskWizard({
         </div>
 
         <div className="rounded-lg border border-[var(--lb-border)] p-4">
-          <label className="flex cursor-pointer items-center gap-2 text-[13px] font-semibold text-[var(--lb-text-2)]">
-            <input
-              type="checkbox"
-              checked={benchmarkOn}
-              onChange={(e) => setBenchmarkOn(e.target.checked)}
-              className="size-4 accent-[var(--lb-primary)]"
-            />
-            {t("⑤ 压缩前后性能基准（CPU 延迟 / 吞吐 / 峰值内存）", "5. CPU benchmark (latency / throughput / memory)")}
-          </label>
+          <p className="text-[13px] font-semibold text-[var(--lb-text-2)]">
+            {t("⑤ 压缩前后性能基准（可选）", "5. CPU benchmark (optional)")}
+          </p>
+          <SelectField
+            label={t("是否执行基准", "Run benchmark")}
+            value={benchmarkOn ? "on" : "off"}
+            onChange={(e) => setBenchmarkOn(e.target.value === "on")}
+          >
+            <option value="off">{t("不执行", "Disabled")}</option>
+            <option value="on">{t("执行（延迟 / 吞吐 / 峰值内存）", "Run (latency / throughput / memory)")}</option>
+          </SelectField>
           {benchmarkOn && (
             <div className="mt-3 grid gap-3 sm:grid-cols-2">
               <TextField label={t("输入形状", "Input shape")} value={benchmarkShape} onChange={(e) => setBenchmarkShape(e.target.value)} />
@@ -362,6 +462,7 @@ function CompressionsPage() {
   const [datasets, setDatasets] = useState<DatasetPublic[]>([])
   const [statusFilter, setStatusFilter] = useState<"all" | TaskStatus>("all")
   const [wizardOpen, setWizardOpen] = useState(false)
+  const [chatTaskId, setChatTaskId] = useState<string | null>(null)
   const [notice, setNotice] = useState("")
   const [loadError, setLoadError] = useState("")
 
@@ -446,7 +547,12 @@ function CompressionsPage() {
           <Button variant="outline" onClick={() => void loadMeta()} disabled={loading}>
             <RefreshCw size={14} className={loading ? "animate-spin" : ""} /> {t("刷新", "Refresh")}
           </Button>
-          <Button onClick={() => setWizardOpen(true)}>
+          <Button
+            onClick={() => {
+              setWizardOpen(true)
+              void loadMeta()
+            }}
+          >
             <PlusCircle size={15} /> {t("新建压缩", "New Task")}
           </Button>
         </div>
@@ -547,6 +653,16 @@ function CompressionsPage() {
                     </td>
                     <td className="lb-td">
                       <div className="flex items-center justify-end gap-1.5">
+                        {task.status === "succeeded" && task.method === "llm_quantize" && (
+                          <Button
+                            size="sm"
+                            variant="ghost"
+                            aria-label={t("对话测试", "Chat test")}
+                            onClick={() => setChatTaskId(task.id)}
+                          >
+                            <MessageSquare size={14} />
+                          </Button>
+                        )}
                         {task.status === "succeeded" && (task.metrics?.benchmark || task.metrics?.eval) && (
                           <Button
                             size="sm"
@@ -584,7 +700,10 @@ function CompressionsPage() {
         </div>
       </Card>
 
-      {wizardOpen && models.length > 0 && (
+      {chatTaskId && (
+        <ChatModal taskId={chatTaskId} open onClose={() => setChatTaskId(null)} />
+      )}
+      {wizardOpen && (
         <TaskWizard
           open
           presetModelId={presetModelId}

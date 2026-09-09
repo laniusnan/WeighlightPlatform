@@ -102,3 +102,38 @@ Check the file [release-notes.md](./release-notes.md).
 ## License
 
 The Full Stack FastAPI Template is licensed under the terms of the MIT license.
+
+## 可移植特性与算法路线图
+
+结合 workspace 内 `mmrazor`、`lmdeploy`、`xtuner` 的甄别结论（完整分析见
+[`docs/portable-features.md`](docs/portable-features.md)）：
+
+- **推荐移植（CPU 可行）**：mmrazor 的 KD 蒸馏、L1/L2 结构化剪枝与 BN-Slim、迭代幅度稀疏；
+  lmdeploy 的 weight-only INT4 量化思想；已按 P0/P1/P2 排入本仓库后端路线。
+          **已落地：P0-1 —— `prune` 现支持 `algorithm=l1|l2|bnslim`（结构化剪枝）。**
+          **P0-2 —— `sparsify` 现支持 `strategy=uniform|global`（全局幅度稀疏）。**
+          **P1 —— 新增 `distill` 方法（arch.py 学生 + width_mult + 类别数据集 的知识蒸馏）。**
+          **P1 —— `llm_quantize` 支持 weight-only RTN group-wise（`group_size`/`sym`，INT4/INT8）。**
+- **概念对位已存在**：OpenVINO 量化导出、ONNX 静态/动态 INT8、OpenAI 兼容 Chat/SSE 推理、
+  压缩前后 CPU 基准（p50/p99/吞吐/内存）。
+- **不移植（GPU/C++ 绑定）**：xtuner LoRA/DPO 微调、mmrazor NAS、lmdeploy Turbomind/TRT/KV 优化——
+  作为后续 GPU Worker 扩展的候选。
+
+> 实现某一项（例如 `distill` 蒸馏、`prune` 的 L1/BN-Slim）时，会同步更新：
+> `backend/app/models.py`（CompressionMethod）、压缩任务后端实现、前端方法卡片与向导、以及本文档。
+
+---
+
+## GPU 支持（规划阶段）
+
+平台当前全部计算在 **CPU** 上执行。代码已为 NVIDIA GPU 迁移做了架构准备：
+
+- 新增计算后端配置：`COMPUTE_BACKEND=cpu|gpu`、`GPU_DEVICE_IDS`、`CUDA_VISIBLE_DEVICES`；
+- 计算服务抽象层位于 `backend/app/services/`：CPU 实现直接复用现有管线，
+  GPU 实现为骨架（`*_gpu.py`），未来按方法逐个使能即可；
+- Arq worker 启动时打印当前计算后端（`docker logs <worker>` 可查）。
+
+**当前请保持 `COMPUTE_BACKEND=cpu`（默认）。** 详细评估与使能步骤见
+[`docs/gpu-migration-plan.md`](docs/gpu-migration-plan.md) 与
+[`docs/architecture.md`](docs/architecture.md)；调试可运行
+`python backend/scripts/check_backend.py`。

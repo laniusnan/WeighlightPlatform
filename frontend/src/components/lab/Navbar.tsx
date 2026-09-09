@@ -10,6 +10,8 @@ import { useI18n } from "./i18n"
 import { useLabTheme } from "./theme"
 import {
   BarChart3,
+  Beaker,
+  BookOpen,
   Boxes,
   FlaskConical,
   Languages,
@@ -45,6 +47,8 @@ export function Navbar() {
     { to: "/lab/compressions", label: t("压缩任务", "Compressions"), icon: FlaskConical },
     { to: "/lab/evaluate", label: t("评估对比", "Evaluate"), icon: BarChart3 },
     { to: "/lab/export", label: t("部署导出", "Deploy"), icon: Rocket },
+    { to: "/lab/selfcheck", label: t("实验自检", "Self-check"), icon: Beaker },
+    { to: "/lab/docs", label: t("使用文档", "Docs"), icon: BookOpen },
   ]
 
   return (

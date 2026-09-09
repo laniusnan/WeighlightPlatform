@@ -11,7 +11,7 @@ export function AuthBar() {
   const { locale, t, toggle: toggleLocale } = useI18n()
 
   return (
-    <div className="absolute right-5 top-5 flex items-center gap-1.5">
+    <div className="fixed right-5 top-5 z-50 flex items-center gap-1.5">
       <button
         type="button"
         aria-label={t("切换语言", "Switch language")}

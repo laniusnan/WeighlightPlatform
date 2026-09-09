@@ -30,13 +30,30 @@ class Settings(BaseSettings):
     SENTRY_DSN: HttpUrl | None = None
     DATABASE_URL: PostgresDsn
 
-    # Task queue (Arq) and model file storage
+    # -------------------------------------------------------------------------
+    # Compute-backend configuration (GPU migration prep).
+    #
+    #   COMPUTE_BACKEND=cpu (default) | gpu
+    #   GPU_DEVICE_IDS=0,1              # devices this deployment may schedule on
+    #   CUDA_VISIBLE_DEVICES=...        # set by the orchestrator/Docker Compose;
+    #                                   # this process only *reads* the value.
+    # -------------------------------------------------------------------------
     REDIS_URL: str = "redis://localhost:6379/0"
+    COMPUTE_BACKEND: str = "cpu"
+    GPU_DEVICE_IDS: str = "0"
+    # CUDA_VISIBLE_DEVICES is handled by the runtime environment; read for
+    # logging/introspection only (see app.services.base.resolve_devices()).
+    CUDA_VISIBLE_DEVICES: str | None = None
+
     MODEL_STORAGE_PATH: str = "./models-storage"
     # Maximum size (in bytes) allowed for a single downloaded/pulled model file
     MAX_MODEL_DOWNLOAD_BYTES: int = 10 * 1024 * 1024 * 1024  # 10 GB
     # Per-user storage quota (models + datasets). Set to 0 to disable.
     USER_STORAGE_QUOTA_BYTES: int = 50 * 1024 * 1024 * 1024  # 50 GB
+    # Read-only roots allowed for "import from server-local directory".
+    # Multiple paths separated by ';'. Containers mount host model folders here
+    # (compose.cpu.yml: /home/zhangxuefei/Model -> /models-local).
+    LOCAL_MODEL_DIRS: str = "/models-local"
 
     @field_validator("DATABASE_URL", mode="before")
     @classmethod

@@ -62,6 +62,16 @@ export const apiPlatformStatus = () =>
 
 export const apiWorkers = () =>
   http.get<WorkersStatus>("/api/v1/utils/workers/").then((r) => r.data)
+export const apiSelfcheckFitNets = () =>
+  http
+    .post<Record<string, unknown>>("/api/v1/utils/selfcheck/fitnets")
+    .then((r) => r.data)
+
+export const apiSelfcheckRun = (check: string) =>
+  http
+    .post<Record<string, unknown>>("/api/v1/utils/selfcheck/run", { check })
+    .then((r) => r.data)
+
 
 /* ----------------------------- 模型管理 ------------------------------- */
 export interface ListModelsQuery {
@@ -127,7 +137,68 @@ export const apiPullModel = (input: PullModelInput) =>
 export const apiDeleteModel = (id: string) =>
   http.delete(`/api/v1/models/${id}`).then((r) => r.data)
 
+
+export interface ChatTurn {
+  role: "user" | "assistant"
+  content: string
+}
+
+export interface ChatSampling {
+  max_new_tokens: number
+  temperature: number
+  top_p: number
+  min_p: number
+}
+
+export const apiChatCompletion = async (
+  taskId: string,
+  messages: ChatTurn[],
+  sampling: ChatSampling,
+): Promise<{ content: string }> => {
+  const data = await http
+    .post<{
+      choices?: { message?: { content?: string } }[]
+    }>("/api/v1/inference/chat/completions", {
+      task_id: taskId,
+      messages,
+      stream: false,
+      ...sampling,
+    })
+    .then((r) => r.data)
+  return { content: data.choices?.[0]?.message?.content ?? "" }
+}
+
 export const modelDownloadPath = (id: string) => `/api/v1/models/${id}/download`
+
+export interface ImportLocalModelInput {
+  name?: string
+  /** Path inside the container under a read-only local root, e.g. /models-local/Qwen2.5-0.5B-Instruct */
+  server_path: string
+  framework: ModelFramework
+  description?: string
+}
+
+export interface LocalDirInfo {
+  name: string
+  path: string
+  has_config: boolean
+  weight_files: number
+}
+
+export const apiListLocalModelDirs = () =>
+  http
+    .get<{ roots: string[]; dirs: LocalDirInfo[] }>("/api/v1/models/local-dirs")
+    .then((r) => r.data)
+
+export const apiImportLocalModel = (input: ImportLocalModelInput) =>
+  http
+    .post<ModelPublic>("/api/v1/models/import-local", {
+      name: input.name ?? null,
+      server_path: input.server_path,
+      framework: input.framework,
+      description: input.description ?? null,
+    })
+    .then((r) => r.data)
 
 /* ----------------------------- 数据集 -------------------------------- */
 export const apiListDatasets = (limit = 100) =>

@@ -23,7 +23,11 @@ ENV VITE_API_URL=$VITE_API_URL
 RUN bun run build
 
 
-FROM python:3.14
+FROM python:3.11
+
+# libGL/libglib: required by torchvision image ops (pulled in via ultralytics),
+# which transformers qwen2 modeling imports at runtime.
+RUN sed -i 's|deb.debian.org|mirrors.tuna.tsinghua.edu.cn|g' /etc/apt/sources.list.d/debian.sources     && apt-get update     && apt-get install -y --no-install-recommends libgl1 libglib2.0-0     && rm -rf /var/lib/apt/lists/*
 
 ENV PYTHONUNBUFFERED=1
 ENV UV_COMPILE_BYTECODE=1

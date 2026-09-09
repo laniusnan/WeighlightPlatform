@@ -60,6 +60,47 @@ async def pull_model(_ctx: object, model_id: object) -> None:
     await asyncio.to_thread(_pull_model_sync, model_id)
 
 
+def _mark_compression_failed(task_id: object, message: str) -> None:
+    """Best-effort failure bookkeeping when the service layer raises.
+
+    The CPU path never reaches here (run_compression_task owns its exception
+    handling); this exists for backend implementations that are not ready yet
+    (e.g. the GPU skeleton) so tasks fail cleanly instead of hanging.
+    """
+    from datetime import UTC, datetime
+
+    from app.models import TaskStatus
+
+    with Session(engine) as session:
+        task = session.get(Model, task_id)
+        if task is None:
+            return
+        task.status = TaskStatus.failed.value
+        task.error_message = message[:2048]
+        task.finished_at = datetime.now(UTC)
+        session.add(task)
+        session.commit()
+
+
 async def run_compression(_ctx: object, task_id: object) -> None:
-    """Run a compression task (quantization / pruning / conversion / eval)."""
-    await asyncio.to_thread(run_compression_task, task_id)
+    """Run a compression task through the selected compute backend.
+
+    COMPUTE_BACKEND=cpu (default) delegates to the existing pipeline
+    (``run_compression_task``) unchanged. COMPUTE_BACKEND=gpu uses the GPU
+    service skeleton, which currently marks the task as failed with a clear
+    message until implementations land.
+    """
+    import logging
+
+    logger = logging.getLogger("app.jobs.run_compression")
+    try:
+        from app.services import NotImplementedBackendError, get_service_bundle
+
+        bundle = get_service_bundle()
+        await asyncio.to_thread(bundle.runner.run, task_id)
+    except NotImplementedBackendError as exc:
+        logger.critical("compression skipped (backend not ready): %s", exc)
+        _mark_compression_failed(task_id, str(exc))
+    except Exception as exc:  # defensive: never let a job die silently
+        logger.exception("compression failed on backend: %s", exc)
+        _mark_compression_failed(task_id, f"{type(exc).__name__}: {exc}")

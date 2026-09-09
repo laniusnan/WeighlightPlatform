@@ -1,0 +1,23 @@
+# -----------------------------------------------------------------------------
+# AI Model Lightweight Platform - backend dependencies
+#
+# NOTE: the authoritative dependency list lives in `pyproject.toml` and is
+# resolved/locked by `uv.lock` (used by the Docker images). This file is a
+# human-readable CPU snapshot for reference only.
+#
+# CPU compute stack (verified combination, see docs/portable-features.md):
+#   python>=3.11
+#   torch==2.9.1+cpu            # CPU-only wheel index (see pyproject overrides)
+#   torchvision==0.24.1+cpu
+#   transformers>=4.49,<4.50
+#   tokenizers>=0.21,<0.22
+#   openvino>=2025,<2027
+#   nncf>=3.0,<4.0
+#   optimum>=1.21,<3.0
+#   optimum-intel>=1.21,<3.0
+#   onnx / onnxruntime / onnxsim
+#
+# Install with uv (recommended):
+#   uv sync --no-dev --package app
+# -----------------------------------------------------------------------------
+openpyxl>=3.1.2  # Excel instruction-set parsing for llm_finetune

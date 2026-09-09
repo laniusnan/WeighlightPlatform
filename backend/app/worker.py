@@ -56,8 +56,14 @@ class WorkerSettings:
     # Arq reads these straight from the class namespace and calls them with
     # only ``ctx`` (no ``self``), so they must not be instance methods.
     async def on_startup(ctx: dict) -> None:  # type: ignore[no-untyped-def]
+        from app.services import configure_runtime, resolve_backend
+
+        compute = await asyncio.to_thread(configure_runtime, resolve_backend())
         ctx["started_at"] = time.time()
         ctx["_stop"] = False
+        ctx["compute"] = compute
+        # Visible in `docker logs <worker>` even without a logging config.
+        print(f"[worker] compute backend={compute}", flush=True)
         ctx["heartbeat_task"] = asyncio.create_task(_heartbeat_loop(ctx))
 
     async def on_shutdown(ctx: dict) -> None:  # type: ignore[no-untyped-def]

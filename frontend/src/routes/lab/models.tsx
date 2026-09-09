@@ -6,7 +6,9 @@ import { createFileRoute, useNavigate } from "@tanstack/react-router"
 import {
   Boxes,
   CloudDownload,
+  Database,
   Download,
+  FolderInput,
   Link2,
   RefreshCw,
   Search,
@@ -28,16 +30,22 @@ import {
   TextAreaField,
 } from "@/components/lab/ui"
 import {
+  apiDeleteDataset,
   apiDeleteModel,
   apiFetchAllModels,
+  apiListDatasets,
+  apiImportLocalModel,
+  apiListLocalModelDirs,
   apiListTasks,
   apiPullModel,
+  apiUploadDataset,
   apiUploadModel,
   modelDownloadPath,
 } from "@/services/api"
 import { downloadBlob } from "@/services/http"
 import { formatBytes, formatDateTime } from "@/services/format"
 import type {
+  DatasetPublic,
   ModelFramework,
   ModelPublic,
   ModelStatus,
@@ -267,6 +275,118 @@ function PullModelModal({
   )
 }
 
+
+function ImportLocalModal({
+  open,
+  onClose,
+  onSuccess,
+}: {
+  open: boolean
+  onClose: () => void
+  onSuccess: () => void
+}) {
+  const { t } = useI18n()
+  const [name, setName] = useState("")
+  const [framework, setFramework] = useState<ModelFramework>("huggingface")
+  const [serverPath, setServerPath] = useState("")
+  const [description, setDescription] = useState("")
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState("")
+  const [localDirs, setLocalDirs] = useState<{ name: string; path: string; has_config: boolean }[]>([])
+  const [presetPath, setPresetPath] = useState("")
+
+  useEffect(() => {
+    if (!open) return
+    setLocalDirs([])
+    apiListLocalModelDirs()
+      .then((res) => setLocalDirs(res.dirs))
+      .catch(() => {
+        /* server may have LOCAL_MODEL_DIRS empty; manual path still works */
+      })
+  }, [open])
+
+  const submit = async () => {
+    if (!serverPath.trim()) {
+      setError(t("请填写服务器上的模型目录路径", "Please provide the model directory path on the server"))
+      return
+    }
+    setBusy(true)
+    setError("")
+    try {
+      await apiImportLocalModel({
+        name: name.trim() || serverPath.trim().split("/").pop() || "model",
+        framework,
+        server_path: serverPath.trim(),
+        description: description.trim() || undefined,
+      })
+      setName("")
+      setServerPath("")
+      setDescription("")
+      onSuccess()
+      onClose()
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <Modal
+      open={open}
+      onClose={onClose}
+      title={t("导入服务器本地模型", "Import server-local model")}
+      footer={
+        <>
+          <Button variant="outline" onClick={onClose}>
+            {t("取消", "Cancel")}
+          </Button>
+          <Button onClick={() => void submit()} disabled={busy}>
+            {busy ? t("提交中…", "Submitting…") : t("开始导入", "Import")}
+          </Button>
+        </>
+      }
+    >
+      <div className="grid gap-4">
+        <TextField label={t("模型名称", "Model name")} value={name} onChange={(e) => setName(e.target.value)} placeholder={t("默认取目录名", "Defaults to directory name")} />
+        <SelectField
+          label={t("或从服务器已有目录选择", "…or pick an existing server directory")}
+          value={presetPath}
+          onChange={(e) => {
+            const path = e.target.value
+            setPresetPath(path)
+            if (path) setServerPath(path)
+          }}
+        >
+          <option value="">{localDirs.length ? t("选择目录…（也可以在下框手填）", "Choose… (or type below)") : t("（服务器没有可用目录，请手填）", "(no local dirs found - type below)")}</option>
+          {localDirs.map((d) => (
+            <option key={d.path} value={d.path}>
+              {d.name}{" "}
+              {d.has_config ? t("（HF 就绪）", " (HF ready)") : ""}
+            </option>
+          ))}
+        </SelectField>
+        <TextField
+          label={t("服务器目录（挂载为 /models-local，可手填）", "Server directory (mounted at /models-local, editable)")}
+          value={serverPath}
+          onChange={(e) => {
+            setServerPath(e.target.value)
+            if (presetPath && e.target.value !== presetPath) setPresetPath("")
+          }}
+          placeholder="/models-local/Qwen2.5-0.5B-Instruct"
+        />
+        <SelectField label={t("框架", "Framework")} value={framework} onChange={(e) => setFramework(e.target.value as ModelFramework)}>
+          {FRAMEWORKS.map((f) => (
+            <option key={f.value} value={f.value}>{f.label}</option>
+          ))}
+        </SelectField>
+        <TextAreaField label={t("描述（可选）", "Description (optional)")} value={description} onChange={(e) => setDescription(e.target.value)} />
+        {error && <p className="text-sm text-[var(--lb-danger)]">{error}</p>}
+      </div>
+    </Modal>
+  )
+}
+
 /* ------------------------------------------------------------------ */
 
 function ModelsPage() {
@@ -281,17 +401,21 @@ function ModelsPage() {
   const [notice, setNotice] = useState("")
   const [uploadOpen, setUploadOpen] = useState(false)
   const [pullOpen, setPullOpen] = useState(false)
+  const [importOpen, setImportOpen] = useState(false)
+  const [datasets, setDatasets] = useState<DatasetPublic[]>([])
 
   const load = useCallback(async () => {
     setLoading(true)
     setError("")
     try {
-      const [modelsPage, tasksPage] = await Promise.all([
+      const [modelsPage, tasksPage, datasetsPage] = await Promise.all([
         apiFetchAllModels(),
         apiListTasks({ limit: 300 }),
+        apiListDatasets(500),
       ])
       setModels(modelsPage.data)
       setTasks(tasksPage.data)
+      setDatasets(datasetsPage.data)
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e))
     } finally {
@@ -302,6 +426,28 @@ function ModelsPage() {
   useEffect(() => {
     void load()
   }, [load])
+
+  const uploadDataset = async (file: File) => {
+    try {
+      const base = (file.name || "dataset").replace(/\.(zip|tar|gz)$/i, "")
+      await apiUploadDataset(file, base || "dataset")
+      setNotice(t("数据集已上传", "Dataset uploaded"))
+      void load()
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e))
+    }
+  }
+
+  const deleteDataset = async (dataset: DatasetPublic) => {
+    if (!window.confirm(`${t("删除数据集", "Delete dataset")}：${dataset.name}？`)) return
+    try {
+      await apiDeleteDataset(dataset.id)
+      setNotice(t("数据集已删除", "Dataset deleted"))
+      void load()
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e))
+    }
+  }
 
   const filtered = useMemo(() => {
     const kw = search.trim().toLowerCase()
@@ -343,6 +489,9 @@ function ModelsPage() {
         <div className="flex gap-2">
           <Button variant="outline" onClick={() => void load()} disabled={loading}>
             <RefreshCw size={14} className={loading ? "animate-spin" : ""} /> {t("刷新", "Refresh")}
+          </Button>
+          <Button variant="outline" onClick={() => setImportOpen(true)}>
+            <FolderInput size={14} /> {t("本地导入", "Import local")}
           </Button>
           <Button variant="outline" onClick={() => setPullOpen(true)}>
             <CloudDownload size={14} /> {t("拉取模型", "Pull model")}
@@ -485,6 +634,67 @@ function ModelsPage() {
         </div>
       </Card>
 
+      <Card className="p-0">
+        <div className="flex flex-wrap items-center justify-between gap-3 border-b border-[var(--lb-border)] px-5 py-4">
+          <div>
+            <h2 className="flex items-center gap-2 text-[15px] font-semibold text-[var(--lb-text)]">
+              <Database size={16} className="text-[var(--lb-primary)]" />
+              {t("数据集", "Datasets")}
+            </h2>
+            <p className="lb-muted mt-0.5 text-xs">
+              {t("校准/蒸馏/评估/微调用：zip/tar 图片或文本包；也可直接上传 txt/csv/json/jsonl/xlsx/xls 文本或表格", "For calibration / distillation / eval / tuning. Archives (zip/tar) or plain text/table files (txt csv json jsonl xlsx xls)")}
+            </p>
+          </div>
+          <label className="lb-btn lb-btn--outline cursor-pointer">
+            <UploadCloud size={14} /> {t("上传数据集", "Upload dataset")}
+            <input
+              type="file"
+              accept=".zip,.tar,.tar.gz,.tgz,.gz,.txt,.csv,.json,.jsonl,.xlsx,.xls"
+              className="hidden"
+              onChange={(e) => {
+                const file = e.target.files?.[0]
+                if (file) void uploadDataset(file)
+                e.target.value = ""
+              }}
+            />
+          </label>
+        </div>
+        {datasets.length === 0 ? (
+          <p className="px-5 py-6 text-sm text-[var(--lb-muted)]">
+            {t("暂无数据集，可上传 zip/tar 图片包或文本包。", "No datasets yet. Upload a zip/tar archive.")}
+          </p>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="lb-table">
+              <thead>
+                <tr>
+                  <th className="lb-th">{t("名称", "Name")}</th>
+                  <th className="lb-th">{t("大小", "Size")}</th>
+                  <th className="lb-th">{t("创建时间", "Created")}</th>
+                  <th className="lb-th text-right">{t("操作", "Actions")}</th>
+                </tr>
+              </thead>
+              <tbody>
+                {datasets.map((dataset) => (
+                  <tr key={dataset.id} className="lb-tr">
+                    <td className="lb-td"><p className="font-medium text-[var(--lb-text)]">{dataset.name}</p></td>
+                    <td className="lb-td"><span className="lb-mono text-xs">{formatBytes(dataset.size_bytes)}</span></td>
+                    <td className="lb-td"><span className="text-xs text-[var(--lb-muted)]">{formatDateTime(dataset.created_at)}</span></td>
+                    <td className="lb-td">
+                      <div className="flex justify-end">
+                        <Button size="sm" variant="danger" aria-label={t("删除数据集", "Delete dataset")} onClick={() => void deleteDataset(dataset)}>
+                          <Trash2 size={13} />
+                        </Button>
+                      </div>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </Card>
+
       <UploadModelModal
         open={uploadOpen}
         onClose={() => setUploadOpen(false)}
@@ -498,6 +708,14 @@ function ModelsPage() {
         onClose={() => setPullOpen(false)}
         onSuccess={() => {
           setNotice(t("已提交拉取任务，模型就绪后可创建压缩任务", "Pull started. Create a task once the model is Ready."))
+          void load()
+        }}
+      />
+      <ImportLocalModal
+        open={importOpen}
+        onClose={() => setImportOpen(false)}
+        onSuccess={() => {
+          setNotice(t("本地模型已导入并注册为就绪", "Local model imported and registered as Ready."))
           void load()
         }}
       />

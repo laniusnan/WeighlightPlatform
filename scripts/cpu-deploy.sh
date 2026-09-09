@@ -65,7 +65,7 @@ case "${1:-}" in
     if pgrep -f "$PROC_PATTERN" >/dev/null 2>&1; then
       say "构建进行中…（最新日志）"
       tail -5 "$LOG_FILE" || true
-    elif grep -qE 'Successfully (built|tagged)|Built backend' "$LOG_FILE" 2>/dev/null; then
+    elif grep -qE 'Successfully (built|tagged)|Built backend|backend:latest Built' "$LOG_FILE" 2>/dev/null; then
       say "构建完成 ✔  镜像 backend:latest 可用 → ./scripts/cpu-deploy.sh up"
     else
       say "当前无构建进程；若中途失败请看日志尾部："

@@ -21,6 +21,34 @@ export function setToken(token: string, remember: boolean): void {
 export function clearToken(): void {
   localStorage.removeItem(TOKEN_KEY)
   sessionStorage.removeItem(TOKEN_KEY)
+  _sessionCacheValid = false
+  _sessionCacheAt = 0
+}
+
+let _sessionCacheValid = false
+let _sessionCacheAt = 0
+
+/**
+ * True only when a token exists AND the backend accepts it (GET /users/me).
+ * Guards use this instead of mere token presence so stale/expired tokens do
+ * not bounce users away from the login page. Result is cached for 3s.
+ */
+export async function isSessionValid(): Promise<boolean> {
+  const now = Date.now()
+  if (now - _sessionCacheAt < 3000) return _sessionCacheValid
+  _sessionCacheAt = now
+  if (!getToken()) {
+    _sessionCacheValid = false
+    return false
+  }
+  try {
+    await http.get("/api/v1/users/me", { timeout: 8000 })
+    _sessionCacheValid = true
+  } catch {
+    // The 401 interceptor already cleared the token for us.
+    _sessionCacheValid = false
+  }
+  return _sessionCacheValid
 }
 
 export const http = axios.create({

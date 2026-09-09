@@ -7,7 +7,7 @@ export type ID = string
 
 export type ModelFramework = "pytorch" | "onnx" | "huggingface" | "tensorflow"
 export type ModelStatus = "pending" | "ready" | "failed"
-export type ModelSourceType = "upload" | "url"
+export type ModelSourceType = "upload" | "url" | "local"
 
 export interface ModelPublic {
   id: ID
@@ -43,9 +43,11 @@ export type CompressionMethod =
   | "openvino_int8"
   | "prune"
   | "sparsify"
+  | "distill"
   | "qat"
   | "export_gguf"
   | "llm_quantize"
+  | "llm_finetune"
 
 export interface BenchmarkSide {
   latency_ms_mean?: number
