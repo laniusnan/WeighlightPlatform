@@ -275,6 +275,53 @@ def run_llm_finetune_excel_smoke() -> dict[str, object]:
         shutil.rmtree(root, ignore_errors=True)
 
 
+def run_llm_finetune_gpu_smoke() -> dict[str, object]:
+    """GPU HF LoRA SFT smoke on the real Qwen2.5-0.5B snapshot.
+
+    Skips cleanly on CPU-only hosts (no CUDA / no cached HF model) so the
+    server selfcheck page keeps working.
+    """
+    import torch
+
+    if not torch.cuda.is_available():
+        return {"ok": True, "check": "llm_finetune_gpu", "skipped": "no CUDA on this host"}
+    cache = Path.home() / ".cache/huggingface/hub/models--Qwen--Qwen2.5-0.5B/snapshots"
+    snaps = sorted(p for p in cache.glob("*") if p.is_dir()) if cache.exists() else []
+    if not snaps:
+        return {"ok": True, "check": "llm_finetune_gpu", "skipped": "Qwen2.5-0.5B snapshot not cached"}
+    from app.jobs.compression import llm_finetune
+
+    root, _teacher_pt, _data = _prep()
+    try:
+        out_dir = root / "out"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        stub = type("M", (), {})()
+        stub.framework = "huggingface"
+        stub.file_path = str(snaps[-1])
+        stub.source_url = ""
+        _, result = llm_finetune(
+            stub,
+            {"data": "hello => hi there", "epochs": 1, "lr": 3e-4,
+             "lora_rank": 8, "hf_max_len": 128},
+            out_dir,
+            lambda *_: None,
+        )
+        return {
+            "ok": result.get("device") == "cuda",
+            "check": "llm_finetune_gpu",
+            "device": result.get("device"),
+            "hf_lora_layers": result.get("hf_lora_layers"),
+            "initial_loss": result.get("initial_loss"),
+            "final_loss": result.get("final_loss"),
+            "generated": result.get("generated"),
+            "adapter_pt": (out_dir / "adapter_lora.pt").is_file(),
+        }
+    except Exception as exc:
+        return {"ok": False, "check": "llm_finetune_gpu", "error": f"{type(exc).__name__}: {exc}"}
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
 def run_qat_lsq_smoke() -> dict[str, object]:
     """QAT/LSQ smoke: learnable-step INT8 weight training on an auto CNN."""
     from app.jobs.compression import qat
@@ -327,6 +374,7 @@ _SELFCHECKS: dict[str, object] = {
     "qat_lsq": run_qat_lsq_smoke,
     "llm_finetune": run_llm_finetune_smoke,
     "llm_finetune_excel": run_llm_finetune_excel_smoke,
+    "llm_finetune_gpu": run_llm_finetune_gpu_smoke,
 }
 
 

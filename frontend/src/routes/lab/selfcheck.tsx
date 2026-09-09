@@ -104,6 +104,14 @@ function SelfCheckPage() {
       descriptionEn: "Parses CSV/Excel instruction data then runs llm_finetune.",
       run: () => apiSelfcheckRun("llm_finetune_excel"),
     },
+    {
+      key: "llm_finetune_gpu",
+      zh: "GPU HF LoRA（Qwen2.5-0.5B）冒烟",
+      en: "GPU HF LoRA (Qwen2.5-0.5B) smoke",
+      descriptionZh: "CUDA 主机上对真实 Qwen 快照跑 LoRA SFT；CPU-only 主机自动跳过。",
+      descriptionEn: "Runs HF LoRA SFT on Qwen2.5-0.5B when CUDA is present.",
+      run: () => apiSelfcheckRun("llm_finetune_gpu"),
+    },
   ]
 
   const runCheck = async (check: CheckDef) => {

@@ -65,12 +65,16 @@ RUN uv sync --frozen --no-dev --package app
 # --- GPU variant: replace CPU torch with CUDA 12.6 wheels (aliyun mirror) ----
 # Workspace pyproject pins +cpu for the CPU-only server; rebuild the venv torch
 # for local GPU runs only. Keeps Dockerfile.cpu untouched for the server.
+# NOTE: run from /tmp so `uv pip` does NOT pick up the workspace
+# [tool.uv.override-dependencies] (+cpu pin); --find-links targets the flat
+# wheel directory on the aliyun mirror (torch/torchvision +cu126 wheels).
+WORKDIR /tmp
 RUN uv pip uninstall --python /app/.venv/bin/python torch torchvision \
     && uv pip install --python /app/.venv/bin/python \
-        --index-url https://mirrors.aliyun.com/pytorch-wheels/cu126 \
-        --extra-index-url https://pypi.org/simple \
-        --index-strategy unsafe-best-match \
+        --index-url https://pypi.org/simple \
+        --find-links https://mirrors.aliyun.com/pytorch-wheels/cu126/ \
         "torch==2.9.1+cu126" "torchvision==0.24.1+cu126"
+WORKDIR /app
 
 WORKDIR /app/backend/
 
