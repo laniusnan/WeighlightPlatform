@@ -44,7 +44,7 @@ services:
     restart: unless-stopped
     build:
       context: .
-      dockerfile: backend/Dockerfile.cpu
+      dockerfile: backend/Dockerfile.gpu
     depends_on:
       db:
         condition: service_healthy
@@ -88,7 +88,7 @@ services:
     restart: unless-stopped
     build:
       context: .
-      dockerfile: backend/Dockerfile.cpu
+      dockerfile: backend/Dockerfile.gpu
     depends_on:
       db:
         condition: service_healthy
@@ -109,7 +109,10 @@ services:
       MAX_MODEL_DOWNLOAD_BYTES: ${MAX_MODEL_DOWNLOAD_BYTES:-10737418240}
       USER_STORAGE_QUOTA_BYTES: ${USER_STORAGE_QUOTA_BYTES:-53687091200}
       WORKER_MAX_JOBS: ${WORKER_MAX_JOBS:-1}
+      NVIDIA_VISIBLE_DEVICES: "all"
+      NVIDIA_DRIVER_CAPABILITIES: "compute,utility"
     command: ["arq", "app.worker.WorkerSettings"]
+    runtime: nvidia
     shm_size: 2gb
     volumes:
       - models-data:/app/backend/models-storage

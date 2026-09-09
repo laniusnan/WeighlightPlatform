@@ -1,0 +1,77 @@
+# CPU-only deployment image for "AI Model Lightweight Platform".
+# Buildkit-free variant of Dockerfile (works with legacy builders too):
+#  - no RUN --mount=... / no COPY --link
+#  - uv installed via pip into the same python base image
+#  - single `backend:latest` image serves both the FastAPI web app and the
+#    Arq worker (different container commands).
+FROM oven/bun:1 AS frontend-build
+
+WORKDIR /app
+
+COPY package.json bun.lock /app/
+COPY frontend/package.json /app/frontend/
+
+WORKDIR /app/frontend
+
+RUN bun install
+
+COPY ./frontend /app/frontend
+
+ARG VITE_API_URL=
+ENV VITE_API_URL=$VITE_API_URL
+
+RUN bun run build
+
+
+FROM python:3.11
+
+# libGL/libglib: required by torchvision image ops (pulled in via ultralytics),
+# which transformers qwen2 modeling imports at runtime.
+RUN sed -i 's|deb.debian.org|mirrors.tuna.tsinghua.edu.cn|g' /etc/apt/sources.list.d/debian.sources     && apt-get update     && apt-get install -y --no-install-recommends libgl1 libglib2.0-0     && rm -rf /var/lib/apt/lists/*
+
+ENV PYTHONUNBUFFERED=1
+ENV UV_COMPILE_BYTECODE=1
+ENV UV_LINK_MODE=copy
+ENV PATH="/app/.venv/bin:$PATH"
+
+# 降低 uv 并行度，避免在小内存 CPU 机器 / WSL 上构建时内存飙高
+# （机器够强可自行调大：UV_CONCURRENT_DOWNLOADS=50 默认）
+ENV UV_CONCURRENT_DOWNLOADS=8
+ENV UV_CONCURRENT_BUILDS=1
+ENV UV_CONCURRENT_INSTALLS=1
+
+# uv CLI (no BuildKit / multi-stage needed)
+RUN pip install --no-cache-dir "uv==0.9.26"
+
+WORKDIR /app/
+
+# Workspace metadata so `uv sync` can resolve the "app" package deps up front.
+COPY pyproject.toml uv.lock /app/
+COPY backend/pyproject.toml /app/backend/pyproject.toml
+
+# Install all runtime dependencies (torch / onnxruntime / openvino / ...).
+# --no-dev: keep runtime images lean (skip mypy/ty/ruff dev tools).
+RUN uv sync --frozen --no-dev --no-install-workspace --package app
+
+COPY ./backend/scripts /app/backend/scripts
+COPY ./backend/alembic.ini /app/backend/
+
+COPY ./backend/app /app/backend/app
+
+COPY --from=frontend-build /app/backend/app/frontend /app/backend/app/frontend
+
+# Install the workspace package itself into the venv.
+RUN uv sync --frozen --no-dev --package app
+# --- GPU variant: replace CPU torch with CUDA 12.6 wheels (aliyun mirror) ----
+# Workspace pyproject pins +cpu for the CPU-only server; rebuild the venv torch
+# for local GPU runs only. Keeps Dockerfile.cpu untouched for the server.
+RUN uv pip uninstall --python /app/.venv/bin/python torch torchvision \
+    && uv pip install --python /app/.venv/bin/python \
+        --index-url https://mirrors.aliyun.com/pytorch-wheels/cu126 \
+        --extra-index-url https://pypi.org/simple \
+        --index-strategy unsafe-best-match \
+        "torch==2.9.1+cu126" "torchvision==0.24.1+cu126"
+
+WORKDIR /app/backend/
+
+CMD ["fastapi", "run", "--host", "0.0.0.0", "--port", "8000", "--workers", "2"]
