@@ -32,3 +32,5 @@ dist/
 
 .venv311*
 .env.gpu
+.env.*
+!.env.*.example
