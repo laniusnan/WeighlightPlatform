@@ -12,12 +12,19 @@
   - `export_onnx`：PyTorch → ONNX + onnxsim 简化（支持 YOLO）
   - `quantize_onnx`：ONNX 动态 INT8 量化（onnxruntime）
   - `openvino_int8`：OpenVINO IR + NNCF INT8 后训练量化（CPU 推荐）
-  - `prune`：L2 范数结构化卷积滤波器剪枝
-  - `llm_quantize`：LLM（Qwen 等）INT4/INT8 量化导出为 OpenVINO IR（optimum-intel）
+  - `prune`：结构化滤波器剪枝，6 种准则 —— L1/L2 范数、BN-Slim(γ)、AutoSlim(稀疏训练+γ)、
+  Group Fisher(数据驱动 Fisher 信息)、DMCP(Taylor 一阶)（后三需数据集）
+- `qat`：量化感知训练 —— FX QAT 或 LSQ 可学习步长，落成全 INT8 QDQ ONNX（权重+激活校准）
+- `distill`：知识蒸馏（Hinton logits KD / FitNets 特征对齐）
+- `llm_finetune`：LoRA SFT —— CPU 内置微型字符 LM 原型；HuggingFace 模型走真实
+  transformers 路径（需 CUDA，见下方 GPU 说明）
+- 数据集：支持 Excel/CSV 指令集自动解析（.xlsx/.csv/.tsv 前两列 → 问题=>回答）供微调
+- `llm_quantize`：LLM（Qwen 等）INT4/INT8 量化导出为 OpenVINO IR（optimum-intel）
 - **精度评估**：图像分类 Top-1、YOLO mAP、LLM Perplexity（验证集 zip 自动下载）
 - **架构**：FastAPI + Redis + Arq 任务队列，压缩任务在独立 `worker` 容器中串行执行，
   模型文件存放在共享磁盘卷，元数据存 PostgreSQL
-- **部署**：`docker compose -f compose.yml -f compose.deploy.yml up -d`（含 Traefik HTTPS）
+- **自检**：实验页含 9+ 张冒烟卡（FitNets/蒸馏/6 种剪枝/QAT-LSQ/LoRA/指令集），可一键验证全链路
+- **部署（CPU-only 服务器）**：`compose.cpu.yml` + `scripts/cpu-deploy.sh`（8001 端口）
 
 ## Technology Stack and Features
 
@@ -124,16 +131,22 @@ The Full Stack FastAPI Template is licensed under the terms of the MIT license.
 
 ---
 
-## GPU 支持（规划阶段）
+## GPU 支持（本地开发，与 CPU-only 服务器分离）
 
-平台当前全部计算在 **CPU** 上执行。代码已为 NVIDIA GPU 迁移做了架构准备：
+本地 NVIDIA（RTX 4060 8GB）通过两个途径使用 GPU：
 
-- 新增计算后端配置：`COMPUTE_BACKEND=cpu|gpu`、`GPU_DEVICE_IDS`、`CUDA_VISIBLE_DEVICES`；
-- 计算服务抽象层位于 `backend/app/services/`：CPU 实现直接复用现有管线，
-  GPU 实现为骨架（`*_gpu.py`），未来按方法逐个使能即可；
-- Arq worker 启动时打印当前计算后端（`docker logs <worker>` 可查）。
+- **原生 venv**：`.venv311gpu`（torch CUDA + transformers），直接跑真实 HF LoRA SFT：
+  `scripts/local-gpu-qwen-validation.py`（Qwen2.5-0.5B，loss 8.7→6.15，13s）。
+  大模型权重缓存于 `~/.cache/huggingface`（HF_ENDPOINT=https://hf-mirror.com）。
+- **容器栈**：`compose.gpu.yml`（name: mlplatform-gpu-local，8002 端口，worker 分配 1×GPU），
+  依赖 docker compose v2 + nvidia-container-toolkit（一键准备：`sudo bash scripts/setup-local-gpu-docker.sh`）。
 
-**当前请保持 `COMPUTE_BACKEND=cpu`（默认）。** 详细评估与使能步骤见
-[`docs/gpu-migration-plan.md`](docs/gpu-migration-plan.md) 与
-[`docs/architecture.md`](docs/architecture.md)；调试可运行
-`python backend/scripts/check_backend.py`。
+HuggingFace 模型的 `llm_finetune` 在非 CUDA 环境会显式报错，避免 CPU-only 服务器误训大模型。
+服务抽象骨架见 `docs/gpu-worker-architecture.md`、`docs/gpu-migration-plan.md`。
+
+## 代码分支与远程
+
+- `master`：本地主线（CPU 全量方法 + GPU 本地代码）
+- `cpu-server`：CPU-only 服务器（10.110.1.36）实际部署态快照
+- 远程：`git@gitee.com:laniusnan/aimodel-weighlight-platform.git`（SSH）
+- 安全：`.env.*` 全部忽略（仅保留 `*.example` 模板），清单见 `docs/security-gitignore-audit.md`
