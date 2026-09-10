@@ -275,6 +275,41 @@ def run_llm_finetune_excel_smoke() -> dict[str, object]:
         shutil.rmtree(root, ignore_errors=True)
 
 
+def run_llm_finetune_jsonl_smoke() -> dict[str, object]:
+    """JSONL chat/preference dataset -> instruction pairs -> LoRA smoke."""
+    from app.jobs.compression import llm_finetune
+
+    root, teacher_pt, _data = _prep()
+    try:
+        instruct = root / "instruct"
+        instruct.mkdir()
+        lines = [
+            '{"messages":[{"role":"user","content":"hi"},{"role":"assistant","content":"hello"}]}',
+            '{"prompt":"color?","chosen":"blue","rejected":"red"}',
+        ]
+        (instruct / "chat.jsonl").write_text(chr(10).join(lines) + chr(10), encoding="utf-8")
+        out_dir = root / "out"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        _, result = llm_finetune(
+            _model_stub(teacher_pt),
+            {"epochs": 8, "lr": 2e-3, "lora_rank": 4, "max_new": 8, "data_dir": str(instruct)},
+            out_dir,
+            lambda *_: None,
+        )
+        return {
+            "ok": (result.get("demo_data") is False) and result.get("samples") == 2,
+            "check": "llm_finetune_jsonl",
+            "samples": result.get("samples"),
+            "demo_data": result.get("demo_data"),
+            "generated": result.get("generated"),
+            "merged_pt": (out_dir / "model_lora_merged.pt").is_file(),
+        }
+    except Exception as exc:
+        return {"ok": False, "check": "llm_finetune_jsonl", "error": f"{type(exc).__name__}: {exc}"}
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
 def run_llm_finetune_gpu_smoke() -> dict[str, object]:
     """GPU HF LoRA SFT smoke on the real Qwen2.5-0.5B snapshot.
 
@@ -374,6 +409,7 @@ _SELFCHECKS: dict[str, object] = {
     "qat_lsq": run_qat_lsq_smoke,
     "llm_finetune": run_llm_finetune_smoke,
     "llm_finetune_excel": run_llm_finetune_excel_smoke,
+    "llm_finetune_jsonl": run_llm_finetune_jsonl_smoke,
     "llm_finetune_gpu": run_llm_finetune_gpu_smoke,
 }
 
