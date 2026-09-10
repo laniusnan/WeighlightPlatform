@@ -3394,16 +3394,24 @@ def _lora_replace(model: torch.nn.Module, rank: int) -> int:
     return count
 
 def _instruction_pairs_from_files(root: Path) -> tuple[list[tuple[str, str]], str]:
-    """Parse uploaded dataset files (.csv/.tsv/.xlsx) into (q, a) instruction pairs.
+    """Parse uploaded dataset files (.csv/.tsv/.xlsx/.jsonl/.json) into (q, a) pairs.
 
-    Column conventions: first two populated columns are question/answer; header
-    row detection tolerates zh/en names (question|prompt|问题|指令|输入 …).
-    A single text column may also contain '问题 => 回答'. Returns pairs plus a
-    human-readable source description (used by the CPU LoRA SFT prototype).
+    Conventions:
+    * CSV/TSV/Excel: first two populated columns are question/answer (header row
+      detection tolerates zh/en names); a single text column may contain '问题 => 回答'.
+    * JSONL/JSON: supports instruction datasets (instruction/question/prompt +
+      output/answer/response/completion), chat datasets (``messages`` with
+      user/assistant turns, one pair per turn) and preference datasets
+      (``prompt`` + ``chosen`` used as the positive pair for SFT).
+    Returns pairs plus a human-readable source description.
     """
     import csv
+    import json
 
-    files = [p for p in sorted(root.rglob("*")) if p.suffix.lower() in {".csv", ".tsv", ".xlsx", ".xls"}]
+    files = [
+        p for p in sorted(root.rglob("*"))
+        if p.suffix.lower() in {".csv", ".tsv", ".xlsx", ".xls", ".jsonl", ".json"}
+    ]
     if not files:
         return [], ""
 
@@ -3433,9 +3441,61 @@ def _instruction_pairs_from_files(root: Path) -> tuple[list[tuple[str, str]], st
                 seen.add((q, a))
                 pairs.append((q, a))
 
+    def _consume_obj(obj: object) -> None:
+        if not isinstance(obj, dict):
+            return
+        # chat / multi-turn: one (user, assistant) pair per turn
+        msgs = obj.get("messages") or obj.get("conversations")
+        if isinstance(msgs, list):
+            user_buf: str | None = None
+            for m in msgs:
+                if not isinstance(m, dict):
+                    continue
+                role = str(m.get("role") or m.get("from") or "").lower()
+                content = str(m.get("content") or m.get("value") or "").strip()
+                if not content:
+                    continue
+                if role in ("user", "human", "prompter", "question"):
+                    user_buf = content
+                elif role in ("assistant", "gpt", "bot", "answer") and user_buf:
+                    if (user_buf, content) not in seen:
+                        seen.add((user_buf, content))
+                        pairs.append((user_buf, content))
+                    user_buf = None
+            return
+        # instruction-style / preference-style dict
+        q = next(
+            (str(obj[k]).strip() for k in ("instruction", "question", "prompt", "query", "input") if obj.get(k)),
+            "",
+        )
+        extra = str(obj.get("input") or "").strip()
+        if extra and extra != q:
+            q = (q + chr(10) + extra).strip()
+        a = next(
+            (str(obj[k]).strip() for k in ("output", "answer", "response", "completion", "chosen", "reply") if obj.get(k)),
+            "",
+        )
+        if q and a and (q, a) not in seen:
+            seen.add((q, a))
+            pairs.append((q, a))
+
     for f in files:
         try:
-            if f.suffix.lower() in {".csv", ".tsv"}:
+            if f.suffix.lower() in {".jsonl", ".json"}:
+                with f.open(encoding="utf-8-sig") as fh:
+                    text = fh.read().strip()
+                if text.startswith("["):
+                    for obj in json.loads(text):
+                        _consume_obj(obj)
+                else:
+                    for line in text.splitlines():
+                        line = line.strip()
+                        if line:
+                            try:
+                                _consume_obj(json.loads(line))
+                            except Exception:
+                                continue
+            elif f.suffix.lower() in {".csv", ".tsv"}:
                 delim = "\t" if f.suffix.lower() == ".tsv" else ","
                 with f.open(newline="", encoding="utf-8-sig") as fh:
                     _consume([row for row in csv.reader(fh, delimiter=delim)])
@@ -3588,7 +3648,7 @@ def llm_finetune(
     causal-LM path (local GPU when CUDA available); otherwise the built-in CPU
     micro-LM prototype is used so the CPU-only server stays unchanged.
     """
-    if model.framework == "huggingface":
+    if str(getattr(model, "framework", "") or "").lower() == "huggingface":
         import torch as _cu
         if not _cu.cuda.is_available():
             raise ValueError(

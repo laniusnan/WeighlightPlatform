@@ -105,6 +105,14 @@ function SelfCheckPage() {
       run: () => apiSelfcheckRun("llm_finetune_excel"),
     },
     {
+      key: "llm_finetune_jsonl",
+      zh: "JSONL 多轮/偏好 → 指令集冒烟",
+      en: "JSONL chat/preference to instruction smoke",
+      descriptionZh: "解析 messages 多轮对话与 preference(chosen) 数据后进入 LoRA SFT。",
+      descriptionEn: "Parses JSONL chat/preference datasets then runs llm_finetune.",
+      run: () => apiSelfcheckRun("llm_finetune_jsonl"),
+    },
+    {
       key: "llm_finetune_gpu",
       zh: "GPU HF LoRA（Qwen2.5-0.5B）冒烟",
       en: "GPU HF LoRA (Qwen2.5-0.5B) smoke",
