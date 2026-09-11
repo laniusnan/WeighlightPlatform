@@ -80,6 +80,7 @@ services:
     volumes:
       - models-data:/app/backend/models-storage
       - ${HF_CACHE_HOST:-/home/lanius/.cache/huggingface}:/root/.cache/huggingface
+      - ${LOCAL_MODEL_DIRS_HOST:-/home/lanius/.cache/huggingface/hub}:/models-local:ro
     ports:
       - "8002:8000"
 
@@ -117,6 +118,7 @@ services:
     volumes:
       - models-data:/app/backend/models-storage
       - ${HF_CACHE_HOST:-/home/lanius/.cache/huggingface}:/root/.cache/huggingface
+      - ${LOCAL_MODEL_DIRS_HOST:-/home/lanius/.cache/huggingface/hub}:/models-local:ro
     deploy:
       resources:
         reservations:
