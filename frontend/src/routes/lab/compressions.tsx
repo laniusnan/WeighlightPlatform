@@ -6,6 +6,7 @@ import { createFileRoute, useNavigate } from "@tanstack/react-router"
 import {
   Download,
   FlaskConical,
+  Info,
   MessageSquare,
   PlusCircle,
   RefreshCw,
@@ -473,6 +474,7 @@ function CompressionsPage() {
   const [statusFilter, setStatusFilter] = useState<"all" | TaskStatus>("all")
   const [wizardOpen, setWizardOpen] = useState(false)
   const [chatTaskId, setChatTaskId] = useState<string | null>(null)
+  const [artifactTask, setArtifactTask] = useState<TaskPublic | null>(null)
   const [notice, setNotice] = useState("")
   const [loadError, setLoadError] = useState("")
 
@@ -673,6 +675,17 @@ function CompressionsPage() {
                             <MessageSquare size={14} />
                           </Button>
                         )}
+                        {task.status === "succeeded" &&
+                          ["llm_quantize", "export_gguf", "llm_finetune"].includes(task.method) && (
+                            <Button
+                              size="sm"
+                              variant="ghost"
+                              aria-label={t("产物说明", "Artifact details")}
+                              onClick={() => setArtifactTask(task)}
+                            >
+                              <Info size={14} />
+                            </Button>
+                          )}
                         {task.status === "succeeded" && (task.metrics?.benchmark || task.metrics?.eval) && (
                           <Button
                             size="sm"
@@ -712,6 +725,59 @@ function CompressionsPage() {
 
       {chatTaskId && (
         <ChatModal taskId={chatTaskId} open onClose={() => setChatTaskId(null)} />
+      )}
+      {artifactTask && (
+        <Modal
+          open
+          onClose={() => setArtifactTask(null)}
+          title={t("LLM 产物说明", "LLM artifact details")}
+        >
+          <div className="space-y-3 text-[13px]">
+            <p className="lb-muted">
+              {t("方法", "Method")}：{methodLabel(artifactTask.method)} ·{" "}
+              {artifactTask.metrics?.quant_type
+                ? String(artifactTask.metrics.quant_type)
+                : String(artifactTask.metrics?.precision ?? "—")}
+            </p>
+            {(artifactTask.method === "llm_quantize"
+              ? [
+                  ["model.xml", "OpenVINO IR 计算图（INT4/INT8 weight-only 量化）"],
+                  ["model.bin", "量化后的权重（group-wise RTN）"],
+                  ["tokenizer.json / tokenizer_config.json", "分词器配置（与推理接口配套）"],
+                  ["engine_nncf.txt", "标记该产物由 NNCF/optimum 导出"],
+                ]
+              : artifactTask.method === "export_gguf"
+                ? [
+                    ["*.gguf", "llama.cpp 格式（f16/bf16/q8_0/q4_0 由 outtype 决定）"],
+                    ["tokenizer 元数据", "已内嵌进 GGUF，无需额外文件"],
+                  ]
+                : [
+                    ["adapter_lora.pt", "仅 LoRA A/B 适配器（体积小，便于合并/分发）"],
+                    ["model_lora_merged.pt", "LoRA 已烘入基座的完整权重（state_dict）"],
+                    ["finetune_meta.json", "训练元信息：样本数/损失/生成样例/设备"],
+                  ]
+            ).map(([name, desc]) => (
+              <div key={name} className="rounded-md border border-[var(--lb-border)] p-2.5">
+                <p className="lb-mono text-xs font-semibold text-[var(--lb-text)]">{name}</p>
+                <p className="mt-0.5 text-xs text-[var(--lb-muted)]">{desc}</p>
+              </div>
+            ))}
+            <p className="lb-muted text-xs">
+              {t(
+                "所有文件打包为 zip 一次性下载；LLM 微调产物在 CPU 主机为微型原型、在 GPU 主机为真实 HF LoRA。",
+                "All files are served as one zip; llm_finetune is a micro prototype on CPU hosts and a real HF LoRA run on GPU hosts.",
+              )}
+            </p>
+            <Button
+              size="sm"
+              onClick={() =>
+                void downloadBlob(taskDownloadPath(artifactTask.id), `${artifactTask.method}_result`)
+              }
+            >
+              <Download size={14} /> {t("下载全部产物", "Download all artifacts")}
+            </Button>
+          </div>
+        </Modal>
       )}
       {wizardOpen && (
         <TaskWizard
