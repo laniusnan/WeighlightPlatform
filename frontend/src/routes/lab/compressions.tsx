@@ -835,6 +835,26 @@ function CompressionsPage() {
                   : ""}
               </p>
             )}
+            {artifactTask.method === "llm_quantize" && (
+              <p className="lb-muted text-xs">
+                {t("量化参数", "Quant params")}：INT{String(artifactTask.metrics?.bits ?? "?")}
+                {artifactTask.metrics?.group_size !== undefined
+                  ? ` · group ${String(artifactTask.metrics.group_size)}`
+                  : ""}
+                {artifactTask.metrics?.sym !== undefined
+                  ? ` · ${artifactTask.metrics.sym ? "sym" : "asym"}`
+                  : ""}
+                {artifactTask.metrics?.precision ? ` · ${String(artifactTask.metrics.precision)}` : ""}
+              </p>
+            )}
+            {artifactTask.method === "export_gguf" && (
+              <p className="lb-muted text-xs">
+                {t("导出类型", "Export type")}：{String(artifactTask.metrics?.outtype ?? "—")}
+                {artifactTask.metrics?.gguf_bytes !== undefined
+                  ? ` · ${formatBytes(Number(artifactTask.metrics.gguf_bytes))}`
+                  : ""}
+              </p>
+            )}
             {(() => {
               const base: [string, string, string][] = [
                 ...(ARTIFACT_INFO[artifactTask.method]?.items ?? [
