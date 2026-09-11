@@ -1288,6 +1288,62 @@ def _find_llama_quantize(repo: Path, env: dict[str, str]) -> Path:
         "set LLAMA_CPP_PATH to the directory that contains it (see deployment-cpu.md / docs)."
     )
 
+def _python_quantize_q4_0(src: Path, dst: Path) -> None:
+    """Pure-Python GGUF Q4_0 requantizer.
+
+    Fallback for hosts where the C++ ``llama-quantize`` binary is unavailable:
+    reads an f16/f32 GGUF, re-packs every quantizable tensor into ggml Q4_0
+    blocks (d = f16(scale), 16 packed nibble bytes per 32 values) and writes a
+    new GGUF with identical metadata.
+    """
+    import gguf
+    import numpy as np
+
+    reader = gguf.GGUFReader(str(src))
+    arch_field = reader.get_field("general.architecture")
+    arch = str(arch_field.contents()) if arch_field is not None else "llama"
+    writer = gguf.GGUFWriter(str(dst), arch, endianess=reader.endianess)
+    for key, field in reader.fields.items():
+        if key == "general.architecture" or key.startswith("GGUF."):
+            continue
+        vtype = field.types[0]
+        sub = field.types[-1] if vtype == gguf.GGUFValueType.ARRAY else None
+        writer.add_key_value(key, field.contents(), vtype, sub)
+
+    float_types = {
+        gguf.GGMLQuantizationType.F32,
+        gguf.GGMLQuantizationType.F16,
+        gguf.GGMLQuantizationType.BF16,
+    }
+    for t in reader.tensors:
+        shape = tuple(int(x) for x in t.shape)
+        data = t.data
+        if t.tensor_type in float_types and len(shape) >= 1 and shape[-1] % 32 == 0:
+            arr = np.asarray(data, dtype=np.float32).reshape(-1, shape[-1])
+            blocks = arr.reshape(arr.shape[0], -1, 32)
+            amax_idx = np.argmax(np.abs(blocks), axis=2)
+            maxv = np.take_along_axis(blocks, amax_idx[..., None], axis=2)[..., 0]
+            d = np.where(maxv != 0, maxv / -8.0, 0.0)
+            idv = np.where(d != 0, 1.0 / np.where(d != 0, d, 1.0), 0.0)
+            q = np.clip(np.trunc(blocks * idv[..., None] + 8.5), 0, 15).astype(np.uint8)
+            packed = (q[..., :16] | (q[..., 16:] << 4)).astype(np.uint8)
+            out = np.zeros(d.shape, dtype=np.dtype([("d", "<f2"), ("qs", "u1", (16,))]))
+            out["d"] = d.astype(np.float16)
+            out["qs"] = packed
+            writer.add_tensor(
+                t.name,
+                np.frombuffer(out.tobytes(), dtype=np.uint8),
+                raw_shape=(arr.shape[0], (shape[-1] // 32) * 18),
+                raw_dtype=gguf.GGMLQuantizationType.Q4_0,
+            )
+        else:
+            writer.add_tensor(t.name, data, raw_shape=shape, raw_dtype=t.tensor_type)
+    writer.write_header_to_file()
+    writer.write_kv_data_to_file()
+    writer.write_tensors_to_file()
+    writer.close()
+
+
 def export_gguf(
     model: Model,
     params: dict[str, Any],
@@ -1448,19 +1504,34 @@ def export_gguf(
     final_name = out_name
     tool = "llama.cpp"
     if needs_requant:
-        progress(80, f"Re-quantizing to {outtype} with llama-quantize...")
-        quant_tool = _find_llama_quantize(repo, env)
         final_name = out_dir / f"model_{outtype}.gguf"
-        cmd = [str(quant_tool), str(out_name), str(final_name), outtype]
-        rq = subprocess.run(
-            cmd, capture_output=True, text=True, timeout=timeout_s, env=env
-        )
-        if rq.returncode != 0 or not final_name.exists():
-            raise ValueError(
-                f"llama-quantize failed for {outtype}: "
-                f"{(rq.stderr or rq.stdout or '')[-800:]}"
+        used_python = False
+        try:
+            quant_tool = _find_llama_quantize(repo, env)
+        except ValueError:
+            if outtype != "q4_0":
+                raise
+            progress(
+                80,
+                "llama-quantize unavailable; using built-in Python Q4_0 quantizer...",
             )
-        tool = "llama-quantize"
+            _python_quantize_q4_0(out_name, final_name)
+            used_python = True
+            tool = "python-q4_0"
+        if not used_python:
+            progress(80, f"Re-quantizing to {outtype} with llama-quantize...")
+            cmd = [str(quant_tool), str(out_name), str(final_name), outtype]
+            rq = subprocess.run(
+                cmd, capture_output=True, text=True, timeout=timeout_s, env=env
+            )
+            if rq.returncode != 0 or not final_name.exists():
+                raise ValueError(
+                    f"llama-quantize failed for {outtype}: "
+                    f"{(rq.stderr or rq.stdout or '')[-800:]}"
+                )
+            tool = "llama-quantize"
+        if not final_name.exists():
+            raise ValueError(f"Q4_0 requantize produced no file: {final_name}")
     progress(95, "Done.")
     meta: dict[str, Any] = {"outtype": outtype, "tool": tool}
     if hf_id and model_dir is not None:
