@@ -816,14 +816,47 @@ function CompressionsPage() {
                 ? ` · ${t(ARTIFACT_INFO[artifactTask.method].zh, ARTIFACT_INFO[artifactTask.method].en)}`
                 : ""}
             </p>
-            {(ARTIFACT_INFO[artifactTask.method]?.items ?? [
-              ["artifact", "压缩产物", "compressed artifact"],
-            ]).map(([name, zhDesc, enDesc]) => (
-              <div key={name} className="rounded-md border border-[var(--lb-border)] p-2.5">
-                <p className="lb-mono text-xs font-semibold text-[var(--lb-text)]">{name}</p>
-                <p className="mt-0.5 text-xs text-[var(--lb-muted)]">{t(zhDesc, enDesc)}</p>
-              </div>
-            ))}
+            {artifactTask.method === "prune" && (
+              <p className="lb-muted text-xs">
+                {t("剪枝算法", "Algorithm")}：
+                {String(artifactTask.metrics?.prune_algorithm ?? "—")}
+                {typeof artifactTask.metrics?.pruned_filters === "number" &&
+                  ` · ${t("已剪滤波器", "pruned filters")} ${artifactTask.metrics.pruned_filters}/${artifactTask.metrics.total_filters ?? "?"}`}
+                {typeof artifactTask.metrics?.params_after === "number" &&
+                  ` · ${t("剪枝后参数量", "params after")} ${artifactTask.metrics.params_after}`}
+              </p>
+            )}
+            {artifactTask.method === "qat" && (
+              <p className="lb-muted text-xs">
+                {t("方案", "Scheme")}：{String(artifactTask.metrics?.qat_mode ?? "fx_qat")}
+                {artifactTask.metrics?.quant_type ? ` · ${String(artifactTask.metrics.quant_type)}` : ""}
+                {artifactTask.metrics?.final_loss !== undefined
+                  ? ` · loss ${String(artifactTask.metrics.initial_loss ?? "?")}→${String(artifactTask.metrics.final_loss)}`
+                  : ""}
+              </p>
+            )}
+            {(() => {
+              const base: [string, string, string][] = [
+                ...(ARTIFACT_INFO[artifactTask.method]?.items ?? [
+                  ["artifact", "压缩产物", "compressed artifact"],
+                ]),
+              ]
+              if (
+                artifactTask.method === "qat" &&
+                String(artifactTask.metrics?.qat_mode ?? "").includes("lsq")
+              ) {
+                base.push(
+                  ["model_qat_float.onnx", "LSQ 训练后浮点对照", "LSQ-trained float reference"],
+                  ["model_qat_wq.onnx", "仅权重 INT8 QDQ（对照用）", "weight-only INT8 QDQ"],
+                )
+              }
+              return base.map(([name, zhDesc, enDesc]) => (
+                <div key={name} className="rounded-md border border-[var(--lb-border)] p-2.5">
+                  <p className="lb-mono text-xs font-semibold text-[var(--lb-text)]">{name}</p>
+                  <p className="mt-0.5 text-xs text-[var(--lb-muted)]">{t(zhDesc, enDesc)}</p>
+                </div>
+              ))
+            })()}
             <p className="lb-muted text-xs">
               {t(
                 "所有文件打包为 zip 一次性下载；LLM 微调产物在 CPU 主机为微型原型、在 GPU 主机为真实 HF LoRA。",
