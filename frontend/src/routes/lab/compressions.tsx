@@ -857,6 +857,45 @@ function CompressionsPage() {
                 </div>
               ))
             })()}
+            {(artifactTask.metrics?.eval || artifactTask.metrics?.benchmark) && (
+              <div className="rounded-md border border-[var(--lb-border)] p-2.5">
+                <p className="text-xs font-semibold text-[var(--lb-text)]">
+                  {t("评估 / 基准摘要", "Eval & benchmark summary")}
+                </p>
+                {artifactTask.metrics?.eval && (
+                  <p className="lb-mono mt-1 text-xs text-[var(--lb-muted)]">
+                    {t("评估", "Eval")}: {String(artifactTask.metrics.eval.type ?? "")}
+                    {artifactTask.metrics.eval.accuracy !== undefined
+                      ? ` · acc=${artifactTask.metrics.eval.accuracy}`
+                      : ""}
+                    {artifactTask.metrics.eval.baseline_accuracy !== undefined
+                      ? ` (base ${artifactTask.metrics.eval.baseline_accuracy})`
+                      : ""}
+                    {artifactTask.metrics.eval.perplexity !== undefined
+                      ? ` · ppl=${artifactTask.metrics.eval.perplexity}`
+                      : ""}
+                    {artifactTask.metrics.eval.map !== undefined
+                      ? ` · mAP=${artifactTask.metrics.eval.map}`
+                      : ""}
+                    {artifactTask.metrics.eval.error ? ` · error=${artifactTask.metrics.eval.error}` : ""}
+                  </p>
+                )}
+                {artifactTask.metrics?.benchmark && (
+                  <p className="lb-mono mt-1 text-xs text-[var(--lb-muted)]">
+                    {t("基准", "Bench")}:
+                    {artifactTask.metrics.benchmark.original?.latency_ms_mean !== undefined
+                      ? ` orig=${artifactTask.metrics.benchmark.original.latency_ms_mean}ms`
+                      : ""}
+                    {artifactTask.metrics.benchmark.compressed?.latency_ms_mean !== undefined
+                      ? ` → ${artifactTask.metrics.benchmark.compressed.latency_ms_mean}ms`
+                      : ""}
+                    {artifactTask.metrics.benchmark.speedup_x !== undefined
+                      ? ` · ${artifactTask.metrics.benchmark.speedup_x}x`
+                      : ""}
+                  </p>
+                )}
+              </div>
+            )}
             <p className="lb-muted text-xs">
               {t(
                 "所有文件打包为 zip 一次性下载；LLM 微调产物在 CPU 主机为微型原型、在 GPU 主机为真实 HF LoRA。",
