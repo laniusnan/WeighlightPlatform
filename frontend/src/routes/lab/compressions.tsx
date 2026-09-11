@@ -550,6 +550,7 @@ function CompressionsPage() {
   const [models, setModels] = useState<ModelPublic[]>([])
   const [datasets, setDatasets] = useState<DatasetPublic[]>([])
   const [statusFilter, setStatusFilter] = useState<"all" | TaskStatus>("all")
+  const [query, setQuery] = useState("")
   const [wizardOpen, setWizardOpen] = useState(false)
   const [chatTaskId, setChatTaskId] = useState<string | null>(null)
   const [artifactTask, setArtifactTask] = useState<TaskPublic | null>(null)
@@ -580,8 +581,15 @@ function CompressionsPage() {
   }, [loadMeta])
 
   const tasks = tasksPage?.data ?? []
-  const filtered =
-    statusFilter === "all" ? tasks : tasks.filter((task) => task.status === statusFilter)
+  const q = query.trim().toLowerCase()
+  const filtered = (statusFilter === "all" ? tasks : tasks.filter((task) => task.status === statusFilter)).filter(
+    (task) =>
+      !q ||
+      (task.model_name ?? "").toLowerCase().includes(q) ||
+      task.id.toLowerCase().includes(q) ||
+      task.method.toLowerCase().includes(q) ||
+      methodLabel(task.method).toLowerCase().includes(q),
+  )
   const counts = useMemo(() => {
     const map: Record<string, number> = { all: tasks.length }
     for (const task of tasks) map[task.status] = (map[task.status] ?? 0) + 1
@@ -656,6 +664,11 @@ function CompressionsPage() {
       )}
 
       <div className="flex flex-wrap gap-2">
+        <TextField
+          placeholder={t("搜索：模型 / 方法 / 任务 ID", "Search: model / method / task id")}
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+        />
         {filters.map((f) => {
           const active = statusFilter === f.key
           return (
