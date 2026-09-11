@@ -112,6 +112,7 @@ services:
       WORKER_MAX_JOBS: ${WORKER_MAX_JOBS:-1}
       NVIDIA_VISIBLE_DEVICES: "all"
       NVIDIA_DRIVER_CAPABILITIES: "compute,utility"
+      LLAMA_CPP_PATH: /opt/llama.cpp
     command: ["arq", "app.worker.WorkerSettings"]
     runtime: nvidia
     shm_size: 2gb
@@ -119,6 +120,7 @@ services:
       - models-data:/app/backend/models-storage
       - ${HF_CACHE_HOST:-/home/lanius/.cache/huggingface}:/root/.cache/huggingface
       - ${LOCAL_MODEL_DIRS_HOST:-/home/lanius/.cache/huggingface/hub}:/models-local:ro
+      - ${LLAMA_CPP_HOST:-/home/lanius/llama.cpp}:/opt/llama.cpp:ro
     deploy:
       resources:
         reservations:
