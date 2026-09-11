@@ -126,6 +126,7 @@ const METHOD_PARAMS: Record<CompressionMethod, ParamDef[]> = {
     { key: "lr", labelZh: "学习率", labelEn: "Learning rate", placeholder: "2e-3", default: "2e-3" },
     { key: "lora_rank", labelZh: "LoRA rank", labelEn: "LoRA rank", placeholder: "8", default: "8" },
     { key: "max_new", labelZh: "采样生成长度", labelEn: "Max generated tokens", placeholder: "32", default: "32" },
+    { key: "hf_max_len", labelZh: "HF 最大序列长度（GPU/HF 模型）", labelEn: "HF max length (GPU/HF model)", placeholder: "128", default: "128" },
   ],
   export_gguf: [{ key: "outtype", labelZh: "输出类型", labelEn: "Output type", kind: "select", default: "f16", options: [{ value: "f16", labelZh: "FP16", labelEn: "FP16" }, { value: "bf16", labelZh: "BF16", labelEn: "BF16" }, { value: "q8_0", labelZh: "INT8 量化 (q8_0)", labelEn: "INT8 q8_0" }, { value: "q4_0", labelZh: "INT4 量化 (q4_0)", labelEn: "INT4 q4_0" }] }],
   llm_quantize: [
@@ -383,6 +384,15 @@ function TaskWizard({
             ))}
           </SelectField>
         )}
+        {method === "llm_finetune" &&
+          readyModels.find((m) => m.id === modelId)?.framework === "huggingface" && (
+            <p className="lb-muted text-[12px]">
+              {t(
+                "检测到 HuggingFace 模型：llm_finetune 将走真实 HF LoRA 路径，需 CUDA（本地 GPU 版/容器），CPU-only 服务器会明确拒绝。",
+                "HuggingFace model detected: llm_finetune uses the real HF LoRA path and requires CUDA (local GPU).",
+              )}
+            </p>
+          )}
         {method === "distill" && (
           <SelectField
             label={t("蒸馏训练数据集（必选，按类别文件夹结构）", "Distill dataset (required, class folders)")}
