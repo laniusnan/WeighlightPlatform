@@ -23,6 +23,8 @@
 - **精度评估**：图像分类 Top-1、YOLO mAP、LLM Perplexity（验证集 zip 自动下载）
 - **架构**：FastAPI + Redis + Arq 任务队列，压缩任务在独立 `worker` 容器中串行执行，
   模型文件存放在共享磁盘卷，元数据存 PostgreSQL
+- **任务中心**：状态筛选 + 关键字搜索；「产物说明」弹窗展示文件清单/生成参数/评估与基准摘要，一键打包下载
+- **GPU 本地链路（已验证）**：Qwen2.5-0.5B —— LoRA SFT（adapter/merged）→ INT4 OpenVINO IR（954MB→339MB，2.95×）→ GGUF 导出；DPO 偏好对以 preference_pairs.jsonl 预留
 - **自检**：实验页含 9+ 张冒烟卡（FitNets/蒸馏/6 种剪枝/QAT-LSQ/LoRA/指令集），可一键验证全链路
 - **部署（CPU-only 服务器）**：`compose.cpu.yml` + `scripts/cpu-deploy.sh`（8001 端口）
 
