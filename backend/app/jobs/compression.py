@@ -3512,6 +3512,42 @@ def _instruction_pairs_from_files(root: Path) -> tuple[list[tuple[str, str]], st
     return pairs, ", ".join(x.name for x in files)
 
 
+def _export_preference_pairs(root: Path, out_dir: Path) -> int:
+    """Collect preference (prompt/chosen/rejected) samples for future DPO.
+
+    Writes ``preference_pairs.jsonl`` next to the SFT artifacts so a GPU-phase
+    DPO trainer can consume them later; returns the number of samples.
+    """
+    import json
+
+    files = [p for p in sorted(root.rglob("*")) if p.suffix.lower() in {".jsonl", ".json"}]
+    rows: list[dict[str, str]] = []
+    for f in files:
+        try:
+            text = f.read_text(encoding="utf-8-sig").strip()
+            if text.startswith("["):
+                objs = json.loads(text)
+            else:
+                objs = [json.loads(ln) for ln in text.splitlines() if ln.strip()]
+        except Exception:
+            continue
+        for o in objs:
+            if not isinstance(o, dict):
+                continue
+            chosen = str(o.get("chosen") or "").strip()
+            prompt = str(o.get("prompt") or o.get("question") or o.get("instruction") or "").strip()
+            if not chosen or not prompt:
+                continue
+            rows.append({"prompt": prompt, "chosen": chosen,
+                         "rejected": str(o.get("rejected") or "").strip()})
+    if not rows:
+        return 0
+    with (out_dir / "preference_pairs.jsonl").open("w", encoding="utf-8") as fh:
+        for r in rows:
+            fh.write(json.dumps(r, ensure_ascii=False) + chr(10))
+    return len(rows)
+
+
 def _lora_sft_train(
     model: Model,
     params: dict[str, Any],
@@ -3552,6 +3588,7 @@ def _lora_sft_train(
             if q.strip() and a.strip():
                 pairs.append((q.strip(), a.strip()))
     demo = not data_text
+    pref_count = 0
     if not pairs and (params.get("dataset_id") or params.get("data_url") or params.get("data_dir")):
         # Excel / CSV instruction datasets (zip with xlsx/csv inside).
         progress(13, "Resolving instruction dataset (.xlsx/.csv)...")
@@ -3561,6 +3598,7 @@ def _lora_sft_train(
             out_dir / "instruct_data",
         )
         pairs, source_desc = _instruction_pairs_from_files(data_path)
+        pref_count = _export_preference_pairs(data_path, out_dir)
         demo = False
     if not pairs and demo:
         data_text = "\n".join(
@@ -3634,7 +3672,7 @@ def _lora_sft_train(
             f"Epoch {epoch + 1}/{epochs} avg={last_loss:.4f}",
         )
     gpt.eval()
-    return gpt, pairs, vocab, idx, eos, demo, samples, trainable_params, total_params, epochs, lora_rank, lora_layers, initial_loss, last_loss, max_new, data_text
+    return gpt, pairs, vocab, idx, eos, demo, samples, trainable_params, total_params, epochs, lora_rank, lora_layers, initial_loss, last_loss, max_new, data_text, pref_count
 
 def llm_finetune(
     model: Model,
@@ -3677,6 +3715,7 @@ def llm_finetune(
         last_loss,
         max_new,
         _data_text,
+        pref_count,
     ) = _lora_sft_train(model, params, out_dir, progress)
     bos = 1
     eos_id = eos
@@ -3742,6 +3781,8 @@ def llm_finetune(
         "initial_loss": round(initial_loss, 6),
         "final_loss": round(last_loss, 6),
         "generated": generated,
+        "preference_pairs": pref_count,
+        "dpo_ready": pref_count > 0,
         "adapter_pt": "adapter_lora.pt",
         "merged_pt": "model_lora_merged.pt",
         "note": "CPU micro LoRA SFT prototype; 7B-scale needs GPU Worker II (XTuner)",
@@ -3875,6 +3916,7 @@ def _hf_lora_sft(
             if q.strip() and a.strip():
                 pairs.append((q.strip(), a.strip()))
     demo = False
+    pref_count = 0
     if not pairs and (params.get("dataset_id") or params.get("data_url") or params.get("data_dir")):
         dpath = _resolve_eval_data(
             {"type": "classification", "dataset_id": params.get("dataset_id"),
@@ -3882,6 +3924,7 @@ def _hf_lora_sft(
             out_dir / "instruct_data",
         )
         pairs, _ = _instruction_pairs_from_files(dpath)
+        pref_count = _export_preference_pairs(dpath, out_dir)
     if not pairs:
         pairs = [("hello", "hi there"), ("what is your name?", "lanius")]
         demo = True
@@ -3973,6 +4016,7 @@ def _hf_lora_sft(
         "lora_rank": lora_rank, "trainable_params": trainable_params,
         "epochs": epochs, "initial_loss": round(initial_loss, 6),
         "final_loss": round(last_loss, 6), "generated": generated,
+        "preference_pairs": pref_count, "dpo_ready": pref_count > 0,
         "adapter_pt": "adapter_lora.pt", "merged_pt": "model_lora_merged.pt",
         "note": "HF LoRA SFT (local GPU path); CPU-only server keeps micro prototype",
     }

@@ -138,6 +138,84 @@ const METHOD_PARAMS: Record<CompressionMethod, ParamDef[]> = {
   ],
 }
 
+const ARTIFACT_INFO: Record<string, { zh: string; en: string; items: [string, string, string][] }> = {
+  llm_quantize: {
+    zh: "LLM weight-only 量化（OpenVINO IR）",
+    en: "LLM weight-only quantization (OpenVINO IR)",
+    items: [
+      ["model.xml", "OpenVINO IR 计算图（INT4/INT8）", "OpenVINO IR graph (INT4/INT8)"],
+      ["model.bin", "group-wise RTN 量化权重", "group-wise RTN quantized weights"],
+      ["tokenizer*.json", "分词器配置（推理接口配套）", "tokenizer files for inference API"],
+      ["engine_nncf.txt", "NNCF/optimum 导出标记", "NNCF/optimum export marker"],
+    ],
+  },
+  export_gguf: {
+    zh: "GGUF（llama.cpp 生态）",
+    en: "GGUF for llama.cpp",
+    items: [["*.gguf", "f16/bf16/q8_0/q4_0（由 outtype 决定）", "f16/bf16/q8_0/q4_0 by outtype"]],
+  },
+  llm_finetune: {
+    zh: "LoRA 微调（adapter + merged）",
+    en: "LoRA fine-tune (adapter + merged)",
+    items: [
+      ["adapter_lora.pt", "仅 LoRA A/B 适配器（体积小）", "LoRA A/B adapter only (small)"],
+      ["model_lora_merged.pt", "LoRA 已烘入基座权重", "merged state_dict with LoRA baked in"],
+      ["finetune_meta.json", "样本/损失/生成样例/设备", "samples / loss / sample / device"],
+      ["preference_pairs.jsonl", "偏好样本（DPO 预留）", "preference samples reserved for DPO"],
+    ],
+  },
+  prune: {
+    zh: "结构化剪枝",
+    en: "Structured pruning",
+    items: [
+      ["model_pruned.pt", "剪枝后 PyTorch 权重", "pruned PyTorch weights"],
+      ["model_pruned.onnx", "可导出时附带 ONNX", "ONNX when traceable"],
+    ],
+  },
+  qat: {
+    zh: "量化感知训练",
+    en: "Quantization-aware training",
+    items: [
+      ["model_qat.onnx", "FX-QDQ 或 LSQ 全 INT8 QDQ 模型", "FX QDQ or LSQ full INT8 QDQ"],
+      ["model_qat_float.onnx", "LSQ 训练后浮点对照（LSQ 方案）", "float reference (LSQ scheme)"],
+      ["model_qat_wq.onnx", "仅权重 INT8（LSQ 方案）", "weight-only INT8 (LSQ scheme)"],
+    ],
+  },
+  distill: {
+    zh: "知识蒸馏",
+    en: "Knowledge distillation",
+    items: [
+      ["model_student.pt", "学生模型权重", "student weights"],
+      ["model_student.onnx", "学生模型 ONNX（可导出时）", "student ONNX when traceable"],
+    ],
+  },
+  sparsify: {
+    zh: "权重稀疏化",
+    en: "Weight sparsification",
+    items: [["model_sparse.pt", "按幅值置零后的权重", "weights with magnitude zeros"]],
+  },
+  export_onnx: {
+    zh: "ONNX 导出",
+    en: "ONNX export",
+    items: [["model.onnx", "onnxsim 简化后的 ONNX", "simplified ONNX (onnxsim)"]],
+  },
+  quantize_onnx: {
+    zh: "ONNX 动态 INT8",
+    en: "ONNX dynamic INT8",
+    items: [["model_quantized.onnx", "动态 INT8（无需校准）", "dynamic INT8, no calibration"]],
+  },
+  quantize_onnx_static: {
+    zh: "ONNX 静态 INT8（QDQ）",
+    en: "ONNX static INT8 (QDQ)",
+    items: [["model_quantized.onnx", "QDQ 静态 INT8（需校准数据）", "QDQ static INT8 (calibration)"]],
+  },
+  openvino_int8: {
+    zh: "OpenVINO IR",
+    en: "OpenVINO IR",
+    items: [["model.xml + model.bin", "INT8/FP16/FP32 IR 与权重", "IR graph and weights"]],
+  },
+}
+
 const EVAL_TYPES = [
   { value: "", labelZh: "不评估", labelEn: "No evaluation" },
   { value: "classification", labelZh: "图像分类 Top-1", labelEn: "Image classification Top-1" },
@@ -675,8 +753,7 @@ function CompressionsPage() {
                             <MessageSquare size={14} />
                           </Button>
                         )}
-                        {task.status === "succeeded" &&
-                          ["llm_quantize", "export_gguf", "llm_finetune"].includes(task.method) && (
+                        {task.status === "succeeded" && (
                             <Button
                               size="sm"
                               variant="ghost"
@@ -730,36 +807,21 @@ function CompressionsPage() {
         <Modal
           open
           onClose={() => setArtifactTask(null)}
-          title={t("LLM 产物说明", "LLM artifact details")}
+          title={t("压缩产物说明", "Artifact details")}
         >
           <div className="space-y-3 text-[13px]">
             <p className="lb-muted">
-              {t("方法", "Method")}：{methodLabel(artifactTask.method)} ·{" "}
-              {artifactTask.metrics?.quant_type
-                ? String(artifactTask.metrics.quant_type)
-                : String(artifactTask.metrics?.precision ?? "—")}
+              {t("方法", "Method")}：{methodLabel(artifactTask.method)}
+              {ARTIFACT_INFO[artifactTask.method]
+                ? ` · ${t(ARTIFACT_INFO[artifactTask.method].zh, ARTIFACT_INFO[artifactTask.method].en)}`
+                : ""}
             </p>
-            {(artifactTask.method === "llm_quantize"
-              ? [
-                  ["model.xml", "OpenVINO IR 计算图（INT4/INT8 weight-only 量化）"],
-                  ["model.bin", "量化后的权重（group-wise RTN）"],
-                  ["tokenizer.json / tokenizer_config.json", "分词器配置（与推理接口配套）"],
-                  ["engine_nncf.txt", "标记该产物由 NNCF/optimum 导出"],
-                ]
-              : artifactTask.method === "export_gguf"
-                ? [
-                    ["*.gguf", "llama.cpp 格式（f16/bf16/q8_0/q4_0 由 outtype 决定）"],
-                    ["tokenizer 元数据", "已内嵌进 GGUF，无需额外文件"],
-                  ]
-                : [
-                    ["adapter_lora.pt", "仅 LoRA A/B 适配器（体积小，便于合并/分发）"],
-                    ["model_lora_merged.pt", "LoRA 已烘入基座的完整权重（state_dict）"],
-                    ["finetune_meta.json", "训练元信息：样本数/损失/生成样例/设备"],
-                  ]
-            ).map(([name, desc]) => (
+            {(ARTIFACT_INFO[artifactTask.method]?.items ?? [
+              ["artifact", "压缩产物", "compressed artifact"],
+            ]).map(([name, zhDesc, enDesc]) => (
               <div key={name} className="rounded-md border border-[var(--lb-border)] p-2.5">
                 <p className="lb-mono text-xs font-semibold text-[var(--lb-text)]">{name}</p>
-                <p className="mt-0.5 text-xs text-[var(--lb-muted)]">{desc}</p>
+                <p className="mt-0.5 text-xs text-[var(--lb-muted)]">{t(zhDesc, enDesc)}</p>
               </div>
             ))}
             <p className="lb-muted text-xs">

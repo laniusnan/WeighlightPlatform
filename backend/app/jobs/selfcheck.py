@@ -297,9 +297,14 @@ def run_llm_finetune_jsonl_smoke() -> dict[str, object]:
             lambda *_: None,
         )
         return {
-            "ok": (result.get("demo_data") is False) and result.get("samples") == 2,
+            "ok": (result.get("demo_data") is False)
+            and result.get("samples") == 2
+            and result.get("preference_pairs") == 1
+            and (out_dir / "preference_pairs.jsonl").is_file(),
             "check": "llm_finetune_jsonl",
             "samples": result.get("samples"),
+            "preference_pairs": result.get("preference_pairs"),
+            "dpo_ready": result.get("dpo_ready"),
             "demo_data": result.get("demo_data"),
             "generated": result.get("generated"),
             "merged_pt": (out_dir / "model_lora_merged.pt").is_file(),
