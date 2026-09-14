@@ -6,6 +6,7 @@ from typing import Any
 
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import FileResponse
+from pydantic import BaseModel
 from sqlmodel import col, func, select
 
 from app.api.deps import CurrentUser, SessionDep
@@ -358,6 +359,37 @@ async def retry_compression_task(
     await enqueue_job("run_compression", task.id)
     task.model = session.get(Model, task.model_id)
     return _to_public(task)
+
+
+class _ReevaluateRequest(BaseModel):
+    kind: str
+
+
+@router.post("/{task_id}/reevaluate")
+async def reevaluate_compression_task(
+    session: SessionDep,
+    current_user: CurrentUser,
+    task_id: uuid.UUID,
+    body: _ReevaluateRequest,
+) -> Any:
+    """Re-run evaluation or benchmark for a finished task's artifact."""
+    kind = (body.kind or "").strip().lower()
+    if kind not in ("eval", "benchmark"):
+        raise HTTPException(status_code=422, detail="kind must be one of: eval, benchmark")
+    task = _get_user_task(session, current_user, task_id)
+    if task.status != TaskStatus.succeeded.value:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Only succeeded tasks can be re-evaluated (status: {task.status})",
+        )
+    params = task.params or {}
+    if not params.get(kind):
+        raise HTTPException(
+            status_code=422,
+            detail=f"task has no stored {kind} config; create a new task with {kind} enabled",
+        )
+    await enqueue_job("rerun_metrics_job", task.id, kind)
+    return {"queued": True, "kind": kind, "task_id": str(task.id)}
 
 
 @router.delete("/{task_id}", response_model=Message)

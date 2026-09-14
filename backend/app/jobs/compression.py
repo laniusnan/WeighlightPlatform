@@ -3080,6 +3080,54 @@ def _benchmark_llm(
     return result
 
 
+def pick_artifact(out_dir: Path) -> Path:
+    """Pick the primary deployable artifact inside a finished task directory."""
+    priority = [
+        "model_qat.onnx",
+        "model_quantized.onnx",
+        "model.onnx",
+        "model_pruned.onnx",
+        "model_student.onnx",
+        "model_finetuned.onnx",
+    ]
+    for name in priority:
+        candidate = out_dir / name
+        if candidate.is_file():
+            return candidate
+    gguf = sorted(out_dir.glob("*.gguf"))
+    if gguf:
+        return gguf[0]
+    if (out_dir / "model.xml").is_file():
+        return out_dir
+    for pattern in ("model_pruned.pt", "model_student.pt", "model_sparse.pt", "*.pt"):
+        found = sorted(out_dir.glob(pattern))
+        if found:
+            return found[0]
+    raise ValueError("no evaluable artifact found in task directory")
+
+
+def rerun_metrics(
+    model: Model,
+    artifact: Path,
+    kind: str,
+    params: dict[str, Any],
+    out_dir: Path,
+    progress: ProgressCallback,
+) -> dict[str, Any]:
+    """Re-run accuracy evaluation or CPU benchmark for an existing artifact."""
+    if kind == "eval":
+        cfg = params.get("eval")
+        if not cfg:
+            raise ValueError("task has no stored eval config (params.eval)")
+        return run_evaluation(model, artifact, out_dir, cfg, progress)
+    if kind == "benchmark":
+        cfg = params.get("benchmark")
+        if not cfg:
+            raise ValueError("task has no stored benchmark config (params.benchmark)")
+        return run_benchmark(model, artifact, cfg, progress)
+    raise ValueError("kind must be one of: eval, benchmark")
+
+
 def run_benchmark(
     model: Model,
     artifact: Path,

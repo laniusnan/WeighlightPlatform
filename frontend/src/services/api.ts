@@ -245,6 +245,11 @@ export const apiGetTaskProgress = (id: string) =>
     .get<ProgressHistoryResponse>(`/api/v1/compressions/${id}/progress-history`)
     .then((r) => r.data)
 
+export const apiReevaluateTask = (id: string, kind: "eval" | "benchmark") =>
+  http
+    .post<{ queued: boolean; kind: string }>(`/api/v1/compressions/${id}/reevaluate`, { kind })
+    .then((r) => r.data)
+
 export const apiRetryTask = (id: string) =>
   http.post<TaskPublic>(`/api/v1/compressions/${id}/retry`).then((r) => r.data)
 
