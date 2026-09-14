@@ -20,6 +20,7 @@ import { Route as LabLoginRouteImport } from './routes/lab/login'
 import { Route as LabModelsRouteImport } from './routes/lab/models'
 import { Route as LabSelfcheckRouteImport } from './routes/lab/selfcheck'
 import { Route as LabSignupRouteImport } from './routes/lab/signup'
+import { Route as LabTaskTaskIdRouteImport } from './routes/lab/task.$taskId'
 
 const IndexRoute = IndexRouteImport.update({
   id: '/',
@@ -76,6 +77,11 @@ const LabSignupRoute = LabSignupRouteImport.update({
   path: '/signup',
   getParentRoute: () => LabRoute,
 } as any)
+const LabTaskTaskIdRoute = LabTaskTaskIdRouteImport.update({
+  id: '/task/$taskId',
+  path: '/task/$taskId',
+  getParentRoute: () => LabRoute,
+} as any)
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
@@ -89,6 +95,7 @@ export interface FileRoutesByFullPath {
   '/lab/models': typeof LabModelsRoute
   '/lab/selfcheck': typeof LabSelfcheckRoute
   '/lab/signup': typeof LabSignupRoute
+  '/lab/task/$taskId': typeof LabTaskTaskIdRoute
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
@@ -102,6 +109,7 @@ export interface FileRoutesByTo {
   '/lab/models': typeof LabModelsRoute
   '/lab/selfcheck': typeof LabSelfcheckRoute
   '/lab/signup': typeof LabSignupRoute
+  '/lab/task/$taskId': typeof LabTaskTaskIdRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
@@ -116,6 +124,7 @@ export interface FileRoutesById {
   '/lab/models': typeof LabModelsRoute
   '/lab/selfcheck': typeof LabSelfcheckRoute
   '/lab/signup': typeof LabSignupRoute
+  '/lab/task/$taskId': typeof LabTaskTaskIdRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
@@ -131,6 +140,7 @@ export interface FileRouteTypes {
     | '/lab/models'
     | '/lab/selfcheck'
     | '/lab/signup'
+    | '/lab/task/$taskId'
   fileRoutesByTo: FileRoutesByTo
   to:
     | '/'
@@ -144,6 +154,7 @@ export interface FileRouteTypes {
     | '/lab/models'
     | '/lab/selfcheck'
     | '/lab/signup'
+    | '/lab/task/$taskId'
   id:
     | '__root__'
     | '/'
@@ -157,6 +168,7 @@ export interface FileRouteTypes {
     | '/lab/models'
     | '/lab/selfcheck'
     | '/lab/signup'
+    | '/lab/task/$taskId'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
@@ -243,6 +255,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof LabSignupRouteImport
       parentRoute: typeof LabRoute
     }
+    '/lab/task/$taskId': {
+      id: '/lab/task/$taskId'
+      path: '/task/$taskId'
+      fullPath: '/lab/task/$taskId'
+      preLoaderRoute: typeof LabTaskTaskIdRouteImport
+      parentRoute: typeof LabRoute
+    }
   }
 }
 
@@ -256,6 +275,7 @@ interface LabRouteChildren {
   LabModelsRoute: typeof LabModelsRoute
   LabSelfcheckRoute: typeof LabSelfcheckRoute
   LabSignupRoute: typeof LabSignupRoute
+  LabTaskTaskIdRoute: typeof LabTaskTaskIdRoute
 }
 
 const LabRouteChildren: LabRouteChildren = {
@@ -268,6 +288,7 @@ const LabRouteChildren: LabRouteChildren = {
   LabModelsRoute: LabModelsRoute,
   LabSelfcheckRoute: LabSelfcheckRoute,
   LabSignupRoute: LabSignupRoute,
+  LabTaskTaskIdRoute: LabTaskTaskIdRoute,
 }
 
 const LabRouteWithChildren = LabRoute._addFileChildren(LabRouteChildren)
