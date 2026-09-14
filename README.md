@@ -25,6 +25,7 @@
   模型文件存放在共享磁盘卷，元数据存 PostgreSQL
 - **任务中心**：状态筛选 + 关键字搜索；「产物说明」弹窗展示文件清单/生成参数/评估与基准摘要，一键打包下载
 - **GPU 本地链路（已验证）**：Qwen2.5-0.5B —— LoRA SFT（adapter/merged）→ INT4 OpenVINO IR（954MB→339MB，2.95×）→ GGUF 导出；DPO 偏好对以 preference_pairs.jsonl 预留
+- **GGUF 量化矩阵（Qwen2.5-0.5B 实测）**：f16 994MB（转换器直出）· q8_0 531MB/1.88×（直出）· q4_0 283.8MB/3.52×（Python 回退）· q4_K_M 693MB（Python Q4_K 回退，最大误差 0.046）——缺失 `llama-quantize` 时自动走内置纯 numpy/gguf 量化，无需编译；`LLAMA_CPP_PATH` 可预置转换器目录（CPU compose 已默认挂载 /opt/app/llama.cpp）
 - **自检**：实验页含 9+ 张冒烟卡（FitNets/蒸馏/6 种剪枝/QAT-LSQ/LoRA/指令集），可一键验证全链路
 - **部署（CPU-only 服务器）**：`compose.cpu.yml` + `scripts/cpu-deploy.sh`（8001 端口）
 
