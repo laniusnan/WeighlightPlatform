@@ -1288,6 +1288,101 @@ def _find_llama_quantize(repo: Path, env: dict[str, str]) -> Path:
         "set LLAMA_CPP_PATH to the directory that contains it (see deployment-cpu.md / docs)."
     )
 
+def _python_quantize_k_quant(src: Path, dst: Path, qtype: str = "q4_K") -> None:
+    """Pure-Python GGUF Q4_K requantizer (ggml block layout, vectorized).
+
+    Fallback for hosts without the C++ llama-quantize binary. Implements the
+    reference Q4_K packing (d/dmin f16 + 12 packed 6-bit scales/mins + 128
+    nibble bytes per 256 weights); scale/min estimation uses per-32-block
+    min/max (equivalent validity, slightly less optimal than make_qkx2).
+    """
+    import gguf
+    import numpy as np
+
+    reader = gguf.GGUFReader(str(src))
+    arch_field = reader.get_field("general.architecture")
+    arch = str(arch_field.contents()) if arch_field is not None else "llama"
+    writer = gguf.GGUFWriter(str(dst), arch, endianess=reader.endianess)
+    for key, field in reader.fields.items():
+        if key == "general.architecture" or key.startswith("GGUF."):
+            continue
+        vtype = field.types[0]
+        sub = field.types[-1] if vtype == gguf.GGUFValueType.ARRAY else None
+        writer.add_key_value(key, field.contents(), vtype, sub)
+
+    float_types = {
+        gguf.GGMLQuantizationType.F32,
+        gguf.GGMLQuantizationType.F16,
+        gguf.GGMLQuantizationType.BF16,
+    }
+    q4k = gguf.GGMLQuantizationType.Q4_K
+    for t in reader.tensors:
+        shape = tuple(int(x) for x in t.shape)
+        data = t.data
+        if t.tensor_type in float_types and len(shape) >= 1 and shape[-1] % 256 == 0:
+            arr = np.asarray(data, dtype=np.float32).reshape(-1, shape[-1])
+            x = arr.reshape(arr.shape[0], -1, 8, 32)
+            minv = x.min(axis=3)
+            maxv = x.max(axis=3)
+            span = (maxv - minv) / 15.0
+            mins = -minv
+            max_scale = span.max(axis=2)
+            max_min = mins.max(axis=2)
+            safe_ms = np.where(max_scale > 0, max_scale, 1.0)
+            safe_mm = np.where(max_min > 0, max_min, 1.0)
+            ls = np.clip(np.rint(63.0 / safe_ms[..., None] * span), 0, 63).astype(np.uint8)
+            lm = np.clip(np.rint(63.0 / safe_mm[..., None] * mins), 0, 63).astype(np.uint8)
+            scales = np.zeros(ls.shape[:-1] + (12,), dtype=np.uint8)
+            for j in range(4):
+                scales[..., j] = ls[..., j]
+                scales[..., j + 4] = lm[..., j]
+            for j in range(4, 8):
+                scales[..., j + 4] = (ls[..., j] & 0x0F) | ((lm[..., j] & 0x0F) << 4)
+                scales[..., j - 4] |= (ls[..., j] >> 4) << 6
+                scales[..., j] |= (lm[..., j] >> 4) << 6
+            d_f16 = (max_scale / 63.0).astype(np.float16)
+            dmin_f16 = (max_min / 63.0).astype(np.float16)
+            j_idx = np.arange(8)
+            sc = np.where(
+                j_idx < 4,
+                scales[..., j_idx] & 63,
+                (scales[..., j_idx + 4] & 0x0F) | ((scales[..., j_idx - 4] >> 6) << 4),
+            )
+            mvec = np.where(
+                j_idx < 4,
+                scales[..., j_idx + 4] & 63,
+                (scales[..., j_idx + 4] >> 4) | ((scales[..., j_idx] >> 6) << 4),
+            )
+            d_val = d_f16.astype(np.float32)[..., None] * sc.astype(np.float32)
+            dm = dmin_f16.astype(np.float32)[..., None] * mvec.astype(np.float32)
+            safe_d = np.where(d_val != 0, d_val, 1.0)
+            L = np.clip(np.rint((x + dm[..., None]) / safe_d[..., None]), 0, 15).astype(np.uint8)
+            groups = L.reshape(L.shape[0], L.shape[1], 4, 64)
+            qs = (groups[..., :32] | (groups[..., 32:] << 4)).reshape(arr.shape[0], -1, 128)
+            out = np.zeros(
+                d_f16.shape,
+                dtype=np.dtype(
+                    [("d", "<f2"), ("dmin", "<f2"), ("scales", "u1", (12,)), ("qs", "u1", (128,))]
+                ),
+            )
+            out["d"] = d_f16
+            out["dmin"] = dmin_f16
+            out["scales"] = scales
+            out["qs"] = qs
+            writer.add_tensor(
+                t.name,
+                np.frombuffer(out.tobytes(), dtype=np.uint8),
+                raw_shape=(arr.shape[0], (shape[-1] // 256) * 144),
+                raw_dtype=q4k,
+            )
+        else:
+            writer.add_tensor(t.name, data, raw_shape=shape, raw_dtype=t.tensor_type)
+    writer.write_header_to_file()
+    writer.write_kv_data_to_file()
+    writer.write_tensors_to_file()
+    writer.close()
+
+
 def _python_quantize_q4_0(src: Path, dst: Path) -> None:
     """Pure-Python GGUF Q4_0 requantizer.
 
@@ -1374,7 +1469,10 @@ def export_gguf(
             "or a local HF-format model directory"
         )
 
-    outtype = str(params.get("outtype", "f16")).lower()
+    outtype = str(params.get("outtype", "f16")).strip().lower()
+    if outtype.startswith("q") and "_k" in outtype:
+        head, _, tail = outtype.partition("_k")
+        outtype = f"{head}_K{tail.upper()}"
     if outtype not in _GGUF_OUTTYPES:
         raise ValueError(f"Unsupported GGUF outtype: {outtype}")
     needs_requant = outtype not in _GGUF_CONVERTER_OUTTYPES
@@ -1509,15 +1607,23 @@ def export_gguf(
         try:
             quant_tool = _find_llama_quantize(repo, env)
         except ValueError:
-            if outtype != "q4_0":
+            if outtype == "q4_0":
+                progress(
+                    80,
+                    "llama-quantize unavailable; using built-in Python Q4_0 quantizer...",
+                )
+                _python_quantize_q4_0(out_name, final_name)
+                tool = "python-q4_0"
+            elif outtype in ("q4_K", "q4_K_S", "q4_K_M"):
+                progress(
+                    80,
+                    f"llama-quantize unavailable; using built-in Python Q4_K quantizer ({outtype})...",
+                )
+                _python_quantize_k_quant(out_name, final_name, "q4_K")
+                tool = f"python-q4_K({outtype})"
+            else:
                 raise
-            progress(
-                80,
-                "llama-quantize unavailable; using built-in Python Q4_0 quantizer...",
-            )
-            _python_quantize_q4_0(out_name, final_name)
             used_python = True
-            tool = "python-q4_0"
         if not used_python:
             progress(80, f"Re-quantizing to {outtype} with llama-quantize...")
             cmd = [str(quant_tool), str(out_name), str(final_name), outtype]
