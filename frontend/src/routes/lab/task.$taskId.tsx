@@ -120,6 +120,15 @@ function TaskDetailPage() {
               <Download size={14} /> {t("下载产物", "Download artifacts")}
             </Button>
           )}
+          {task.status === "succeeded" && (
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() => navigate({ to: "/lab/evaluate", search: { task: task.id } })}
+            >
+              <MessageSquare size={14} /> {t("转评测页", "Open evaluation")}
+            </Button>
+          )}
           {task.status === "succeeded" && task.method === "llm_quantize" && (
             <Button size="sm" variant="outline" onClick={() => navigate({ to: "/lab/evaluate", search: { task: task.id } })}>
               <MessageSquare size={14} /> {t("对话测试", "Chat test")}
@@ -207,6 +216,66 @@ function TaskDetailPage() {
         </Card>
       </div>
 
+      {Boolean((task.metrics as Record<string, unknown> | undefined)?.benchmark) && (
+        <Card className="space-y-2">
+          <p className="text-[13px] font-semibold text-[var(--lb-text-2)]">
+            {t("对比视图（原始 vs 压缩）", "Comparison (original vs compressed)")}
+          </p>
+          {(() => {
+            const bench = (task.metrics.benchmark ?? {}) as {
+              original?: { latency_ms_mean?: number; throughput_ips?: number; peak_memory_mb?: number }
+              compressed?: { latency_ms_mean?: number; throughput_ips?: number; peak_memory_mb?: number }
+              speedup_x?: number
+            }
+            const rows: [string, string, string][] = [
+              [
+                t("平均延迟", "Latency"),
+                bench.original?.latency_ms_mean !== undefined ? `${bench.original.latency_ms_mean} ms` : "—",
+                bench.compressed?.latency_ms_mean !== undefined ? `${bench.compressed.latency_ms_mean} ms` : "—",
+              ],
+              [
+                t("吞吐", "Throughput"),
+                bench.original?.throughput_ips !== undefined ? `${bench.original.throughput_ips} ips` : "—",
+                bench.compressed?.throughput_ips !== undefined ? `${bench.compressed.throughput_ips} ips` : "—",
+              ],
+              [
+                t("峰值内存", "Peak memory"),
+                bench.original?.peak_memory_mb !== undefined ? `${bench.original.peak_memory_mb} MB` : "—",
+                bench.compressed?.peak_memory_mb !== undefined ? `${bench.compressed.peak_memory_mb} MB` : "—",
+              ],
+              [
+                t("体积", "Size"),
+                formatBytes(Number(task.metrics.input_bytes ?? 0)),
+                formatBytes(Number(task.metrics.output_bytes ?? 0)),
+              ],
+            ]
+            return (
+              <div className="space-y-1 text-xs">
+                <div className="grid grid-cols-3 gap-2 font-semibold text-[var(--lb-text-2)]">
+                  <span />
+                  <span>{t("原始", "Original")}</span>
+                  <span>{t("压缩后", "Compressed")}</span>
+                </div>
+                {rows.map(([k, a, b]) => (
+                  <div key={k} className="grid grid-cols-3 gap-2">
+                    <span className="lb-muted">{k}</span>
+                    <span className="lb-mono">{a}</span>
+                    <span className="lb-mono">{b}</span>
+                  </div>
+                ))}
+                {bench.speedup_x !== undefined && (
+                  <p className="lb-muted">
+                    {t("加速比", "Speedup")}：{bench.speedup_x}x
+                    {typeof task.metrics.size_reduction_pct === "number"
+                      ? ` · ${t("体积减少", "size reduction")} ${task.metrics.size_reduction_pct}%`
+                      : ""}
+                  </p>
+                )}
+              </div>
+            )
+          })()}
+        </Card>
+      )}
       <Card className="space-y-2">
         <p className="text-[13px] font-semibold text-[var(--lb-text-2)]">
           {t("指标（原始）", "Metrics (raw)")}

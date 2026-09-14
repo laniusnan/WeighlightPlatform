@@ -1288,13 +1288,85 @@ def _find_llama_quantize(repo: Path, env: dict[str, str]) -> Path:
         "set LLAMA_CPP_PATH to the directory that contains it (see deployment-cpu.md / docs)."
     )
 
-def _python_quantize_k_quant(src: Path, dst: Path, qtype: str = "q4_K") -> None:
-    """Pure-Python GGUF Q4_K requantizer (ggml block layout, vectorized).
+def _q6_k_blocks(arr: Any, np: Any) -> tuple[bytes, int]:
+    """Vectorized Q6_K packing for one tensor: (bytes, bytes_per_row)."""
+    rows, ncols = arr.shape
+    blocks = arr.reshape(rows, -1, 16, 16)
+    maxabs = np.abs(blocks).max(axis=3)
+    idx = np.abs(blocks).argmax(axis=3)
+    sign = np.take_along_axis(blocks, idx[..., None], axis=3)[..., 0]
+    s_ib = np.where(maxabs > 0, np.sign(sign) * (maxabs / 32.0), 0.0)
+    j = np.argmax(np.abs(s_ib), axis=2)
+    max_scale = np.take_along_axis(s_ib, j[..., None], axis=2)[..., 0]
+    nz = max_scale != 0
+    iscale = np.where(nz, -128.0 / np.where(nz, max_scale, 1.0), 0.0)
+    d = np.where(iscale != 0, 1.0 / np.where(iscale != 0, iscale, 1.0), 0.0)
+    sc_i = np.clip(np.rint(iscale[..., None] * s_ib), -128, 127).astype(np.int8)
+    d_f16 = d.astype(np.float16)
+    d_val = d_f16.astype(np.float32)[..., None] * sc_i.astype(np.float32)
+    safe = np.where(d_val != 0, d_val, 1.0)
+    L = (np.clip(np.rint(blocks / safe[..., None]), -32, 31).astype(np.int8) + np.int8(32)).astype(np.uint8)
+    L = L.reshape(rows, -1, 2, 4, 32)
+    low = L & 0x0F
+    high = L >> 4
+    ql0 = (low[:, :, :, 0, :] | (low[:, :, :, 2, :] << 4)).astype(np.uint8)
+    ql1 = (low[:, :, :, 1, :] | (low[:, :, :, 3, :] << 4)).astype(np.uint8)
+    qh = (
+        high[:, :, :, 0, :]
+        | (high[:, :, :, 1, :] << 2)
+        | (high[:, :, :, 2, :] << 4)
+        | (high[:, :, :, 3, :] << 6)
+    ).astype(np.uint8)
+    ql = np.concatenate([ql0, ql1], axis=-1).reshape(rows, -1, 128)
+    qh = qh.reshape(rows, -1, 64)
+    dtype = np.dtype([("d", "<f2"), ("scales", "i1", (16,)), ("qh", "u1", (64,)), ("ql", "u1", (128,))])
+    out = np.zeros(d_f16.shape, dtype=dtype)
+    out["d"] = d_f16
+    out["scales"] = sc_i
+    out["qh"] = qh
+    out["ql"] = ql
+    return out.tobytes(), (ncols // 256) * 210
 
-    Fallback for hosts without the C++ llama-quantize binary. Implements the
-    reference Q4_K packing (d/dmin f16 + 12 packed 6-bit scales/mins + 128
-    nibble bytes per 256 weights); scale/min estimation uses per-32-block
-    min/max (equivalent validity, slightly less optimal than make_qkx2).
+
+def _python_quantize_k_variant(src: Path, dst: Path, outtype: str) -> None:
+    """K-quant requantizer entry: q4_K/q4_K_S (all Q4_K) and q4_K_M (Q6_K mix)."""
+    if outtype in ("q4_K", "q4_K_S"):
+        _python_quantize_k_quant(src, dst, "q4_K")
+        return
+    if outtype == "q4_K_M":
+        _python_quantize_k_quant(
+            src, dst, "q4_K",
+            {"attn_v.weight": "Q6_K", "ffn_down.weight": "Q6_K", "output.weight": "Q6_K"},
+        )
+        return
+    raise ValueError(f"unsupported python K-quant outtype: {outtype}")
+
+def _q4_0_bytes(arr: Any, np: Any) -> tuple[bytes, int]:
+    """Vectorized Q4_0 packing for one 2-D tensor: (bytes, bytes_per_row)."""
+    rows, ncols = arr.shape
+    blocks = arr.reshape(rows, -1, 32)
+    amax_idx = np.argmax(np.abs(blocks), axis=2)
+    maxv = np.take_along_axis(blocks, amax_idx[..., None], axis=2)[..., 0]
+    d = np.where(maxv != 0, maxv / -8.0, 0.0)
+    idv = np.where(d != 0, 1.0 / np.where(d != 0, d, 1.0), 0.0)
+    q = np.clip(np.trunc(blocks * idv[..., None] + 8.5), 0, 15).astype(np.uint8)
+    packed = (q[..., :16] | (q[..., 16:] << 4)).astype(np.uint8)
+    out = np.zeros(d.shape, dtype=np.dtype([("d", "<f2"), ("qs", "u1", (16,))]))
+    out["d"] = d.astype(np.float16)
+    out["qs"] = packed
+    return out.tobytes(), (ncols // 32) * 18
+
+
+def _python_quantize_k_quant(
+    src: Path,
+    dst: Path,
+    qtype: str = "q4_K",
+    tensor_types: dict[str, str] | None = None,
+) -> None:
+    """Pure-Python GGUF K-quant requantizer (Q4_K / Q6_K, vectorized).
+
+    ``tensor_types`` overrides the target quant per tensor name (q4_K_M mix).
+    Fallback for hosts without the C++ llama-quantize binary.
     """
     import gguf
     import numpy as np
@@ -1315,10 +1387,43 @@ def _python_quantize_k_quant(src: Path, dst: Path, qtype: str = "q4_K") -> None:
         gguf.GGMLQuantizationType.F16,
         gguf.GGMLQuantizationType.BF16,
     }
-    q4k = gguf.GGMLQuantizationType.Q4_K
+    qtype_enum = {
+        "q4_K": gguf.GGMLQuantizationType.Q4_K,
+        "q6_K": gguf.GGMLQuantizationType.Q6_K,
+    }
+    mapping = {k.lower(): v.lower() for k, v in (tensor_types or {}).items()}
+
     for t in reader.tensors:
         shape = tuple(int(x) for x in t.shape)
         data = t.data
+        want = qtype.lower()
+        low_name = t.name.lower()
+        for k, v in mapping.items():
+            if low_name.endswith(k):
+                want = v
+                break
+        if (
+            t.tensor_type in float_types
+            and want == "q6_k"
+            and len(shape) >= 2
+            and shape[-1] % 32 == 0
+        ):
+            arr = np.asarray(data, dtype=np.float32).reshape(-1, shape[-1])
+            if shape[-1] % 256 == 0:
+                raw, bpr = _q6_k_blocks(arr, np)
+                writer.add_tensor(
+                    t.name, np.frombuffer(raw, dtype=np.uint8),
+                    raw_shape=(arr.shape[0], bpr),
+                    raw_dtype=qtype_enum["q6_K"],
+                )
+            else:
+                raw, bpr = _q4_0_bytes(arr, np)
+                writer.add_tensor(
+                    t.name, np.frombuffer(raw, dtype=np.uint8),
+                    raw_shape=(arr.shape[0], bpr),
+                    raw_dtype=gguf.GGMLQuantizationType.Q4_0,
+                )
+            continue
         if t.tensor_type in float_types and len(shape) >= 1 and shape[-1] % 256 == 0:
             arr = np.asarray(data, dtype=np.float32).reshape(-1, shape[-1])
             x = arr.reshape(arr.shape[0], -1, 8, 32)
@@ -1373,7 +1478,7 @@ def _python_quantize_k_quant(src: Path, dst: Path, qtype: str = "q4_K") -> None:
                 t.name,
                 np.frombuffer(out.tobytes(), dtype=np.uint8),
                 raw_shape=(arr.shape[0], (shape[-1] // 256) * 144),
-                raw_dtype=q4k,
+                raw_dtype=qtype_enum["q4_K"],
             )
         else:
             writer.add_tensor(t.name, data, raw_shape=shape, raw_dtype=t.tensor_type)
@@ -1381,7 +1486,6 @@ def _python_quantize_k_quant(src: Path, dst: Path, qtype: str = "q4_K") -> None:
     writer.write_kv_data_to_file()
     writer.write_tensors_to_file()
     writer.close()
-
 
 def _python_quantize_q4_0(src: Path, dst: Path) -> None:
     """Pure-Python GGUF Q4_0 requantizer.
@@ -1617,10 +1721,10 @@ def export_gguf(
             elif outtype in ("q4_K", "q4_K_S", "q4_K_M"):
                 progress(
                     80,
-                    f"llama-quantize unavailable; using built-in Python Q4_K quantizer ({outtype})...",
+                    f"llama-quantize unavailable; using built-in Python K-quant ({outtype})...",
                 )
-                _python_quantize_k_quant(out_name, final_name, "q4_K")
-                tool = f"python-q4_K({outtype})"
+                _python_quantize_k_variant(out_name, final_name, outtype)
+                tool = f"python-K({outtype})"
             else:
                 raise
             used_python = True
