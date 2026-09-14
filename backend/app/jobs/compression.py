@@ -3871,6 +3871,8 @@ def llm_finetune(
                 "(local GPU compose/venv); the CPU-only server only runs the "
                 "built-in micro prototype for PyTorch checkpoints"
             )
+        if str(params.get("stage", "sft")).strip().lower().startswith("dpo"):
+            return _hf_dpo_train(model, params, out_dir, progress)
         return _hf_lora_sft(model, params, out_dir, progress)
     import json
     import torch
@@ -4040,6 +4042,162 @@ def _hf_lora_unwrap(model: torch.nn.Module) -> int:
         else:
             n += _hf_lora_unwrap(child)
     return n
+
+def _hf_dpo_train(
+    model: Model,
+    params: dict[str, Any],
+    out_dir: Path,
+    progress: ProgressCallback,
+) -> tuple[Path, dict[str, Any]]:
+    """DPO (Direct Preference Optimization) LoRA training, GPU path.
+
+    Policy and frozen reference share the same base checkpoint; only LoRA
+    adapters on the policy are trained. Preference samples come from
+    prompt/chosen/rejected rows (dataset jsonl or params["pref_pairs"]).
+    Outputs: adapter_dpo.pt / model_dpo_merged.pt / dpo_meta.json.
+    """
+    import json
+
+    import torch
+    from transformers import AutoModelForCausalLM, AutoTokenizer
+
+    base_dir = None
+    if model.file_path and Path(model.file_path).is_dir():
+        base_dir = Path(model.file_path)
+    repo = str(params.get("model_repo") or "")
+    if base_dir is None and not repo:
+        repo = (getattr(model, "source_url", "") or "").strip()
+    if base_dir is None and not repo:
+        raise ValueError("DPO needs a local HF dir or a HuggingFace repo id")
+    source = str(base_dir) if base_dir is not None else repo
+
+    rows: list[dict[str, str]] = []
+    for item in params.get("pref_pairs") or []:
+        if not isinstance(item, dict):
+            continue
+        p_ = str(item.get("prompt") or "").strip()
+        c_ = str(item.get("chosen") or "").strip()
+        r_ = str(item.get("rejected") or "").strip()
+        if p_ and c_ and r_:
+            rows.append({"prompt": p_, "chosen": c_, "rejected": r_})
+    if not rows and (params.get("dataset_id") or params.get("data_url") or params.get("data_dir")):
+        ddir = _resolve_eval_data(
+            {"type": "classification", "dataset_id": params.get("dataset_id"),
+             "data_url": params.get("data_url"), "data_dir": params.get("data_dir")},
+            out_dir / "pref_data",
+        )
+        for f in sorted(ddir.rglob("*")):
+            if f.suffix.lower() not in {".jsonl", ".json"}:
+                continue
+            try:
+                text = f.read_text(encoding="utf-8-sig").strip()
+                objs = json.loads(text) if text.startswith("[") else [
+                    json.loads(ln) for ln in text.splitlines() if ln.strip()
+                ]
+            except Exception:
+                continue
+            for o in objs:
+                if not isinstance(o, dict):
+                    continue
+                p_ = str(o.get("prompt") or o.get("question") or o.get("instruction") or "").strip()
+                c_ = str(o.get("chosen") or "").strip()
+                r_ = str(o.get("rejected") or "").strip()
+                if p_ and c_ and r_:
+                    rows.append({"prompt": p_, "chosen": c_, "rejected": r_})
+    if not rows:
+        raise ValueError("DPO needs preference rows with prompt/chosen/rejected")
+
+    beta = float(params.get("dpo_beta", 0.1))
+    epochs = max(int(params.get("epochs", 1)), 1)
+    lr = float(params.get("lr", 5e-5))
+    rank = max(int(params.get("lora_rank", 8)), 2)
+    max_len = max(int(params.get("hf_max_len", 128)), 32)
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    tok = AutoTokenizer.from_pretrained(source, trust_remote_code=True)
+    if tok.pad_token_id is None:
+        tok.pad_token = tok.eos_token
+    progress(10, f"DPO: loading policy + reference on {device.type}...")
+    policy = AutoModelForCausalLM.from_pretrained(source, trust_remote_code=True).to(device)
+    ref = AutoModelForCausalLM.from_pretrained(source, trust_remote_code=True).to(device)
+    for prm in ref.parameters():
+        prm.requires_grad = False
+    ref.eval()
+    for prm in policy.parameters():
+        prm.requires_grad = False
+    dim = int(getattr(policy.config, "hidden_size", 768))
+    wrapped = _hf_lora_wrap(policy, rank, (dim * 4, dim * 4))
+    trainable = [prm for prm in policy.parameters() if prm.requires_grad]
+    optim = torch.optim.Adam(trainable, lr=lr)
+    policy.train()
+    def _encode(prompt: str, answer: str) -> tuple[list[int], list[int]]:
+        qids = tok.encode(prompt, add_special_tokens=False)[: max_len // 2]
+        aids = tok.encode(answer, add_special_tokens=False)[: max_len // 2]
+        ids = qids + aids + ([tok.eos_token_id] if tok.eos_token_id is not None else [])
+        mask = [0] * len(qids) + [1] * (len(ids) - len(qids))
+        return ids, mask
+
+    def _logp(module: Any, ids: list[int], mask: list[int]) -> Any:
+        t = torch.tensor([ids], device=device)
+        with torch.set_grad_enabled(module is policy):
+            logits = module(input_ids=t, use_cache=False).logits[0]
+        logp = torch.log_softmax(logits.float(), dim=-1)
+        tgt = torch.tensor(ids[1:], device=device)
+        sel = logp[:-1].gather(1, tgt[:, None]).squeeze(1)
+        m = torch.tensor(mask[1:], dtype=torch.float, device=device)
+        return (sel * m).sum()
+
+    encoded = [
+        (_encode(r["prompt"], r["chosen"]), _encode(r["prompt"], r["rejected"]))
+        for r in rows
+    ]
+
+    def _loss() -> Any:
+        total = 0.0
+        for (ci, cm), (ri, rm) in encoded:
+            pc = _logp(policy, ci, cm)
+            pr = _logp(policy, ri, rm)
+            with torch.no_grad():
+                rc = _logp(ref, ci, cm)
+                rr = _logp(ref, ri, rm)
+            total = total - torch.nn.functional.logsigmoid(beta * ((pc - rc) - (pr - rr)))
+        return total / len(encoded)
+
+    progress(35, f"DPO pairs={len(rows)} beta={beta} lora_layers={wrapped}")
+    first = float(_loss().item())
+    last = first
+    for e in range(epochs):
+        for _i in range(len(encoded)):
+            optim.zero_grad()
+            loss = _loss()
+            loss.backward()
+            optim.step()
+            last = float(loss.item())
+        progress(40 + int(45 * (e + 1) / epochs), f"DPO epoch {e + 1}/{epochs} loss={last:.4f}")
+    policy.eval()
+    adapter = {n: prm.data.clone().cpu() for n, prm in policy.named_parameters() if prm.requires_grad}
+    torch.save(adapter, str(out_dir / "adapter_dpo.pt"))
+    with torch.no_grad():
+        _hf_lora_unwrap(policy)
+    torch.save(policy.state_dict(), str(out_dir / "model_dpo_merged.pt"))
+    (out_dir / "dpo_meta.json").write_text(
+        json.dumps(
+            {"pairs": len(rows), "beta": beta, "device": device.type,
+             "initial_loss": round(first, 6), "final_loss": round(last, 6)},
+            ensure_ascii=False, indent=2,
+        ),
+        encoding="utf-8",
+    )
+    progress(95, "Done.")
+    return out_dir, {
+        "method": "llm_finetune", "stage": "dpo", "quant_type": "dpo_lora",
+        "device": device.type, "pairs": len(rows), "beta": beta,
+        "lora_rank": rank, "dpo_layers": wrapped,
+        "initial_loss": round(first, 6), "final_loss": round(last, 6),
+        "dpo_ready": True,
+        "adapter_pt": "adapter_dpo.pt", "merged_pt": "model_dpo_merged.pt",
+        "note": "DPO LoRA (local GPU path)",
+    }
 
 def _hf_lora_sft(
     model: Model,

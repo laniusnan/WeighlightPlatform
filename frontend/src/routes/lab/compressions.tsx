@@ -5,6 +5,7 @@
 import { createFileRoute, useNavigate } from "@tanstack/react-router"
 import {
   Download,
+  FileText,
   FlaskConical,
   Info,
   MessageSquare,
@@ -128,6 +129,8 @@ const METHOD_PARAMS: Record<CompressionMethod, ParamDef[]> = {
     { key: "lora_rank", labelZh: "LoRA rank", labelEn: "LoRA rank", placeholder: "8", default: "8" },
     { key: "max_new", labelZh: "采样生成长度", labelEn: "Max generated tokens", placeholder: "32", default: "32" },
     { key: "hf_max_len", labelZh: "HF 最大序列长度（GPU/HF 模型）", labelEn: "HF max length (GPU/HF model)", placeholder: "128", default: "128" },
+    { key: "stage", labelZh: "训练阶段", labelEn: "Stage", kind: "select", default: "sft", options: [{ value: "sft", labelZh: "SFT 指令微调", labelEn: "SFT" }, { value: "dpo", labelZh: "DPO 偏好对齐（需 chosen/rejected）", labelEn: "DPO (needs chosen/rejected)" }] },
+    { key: "dpo_beta", labelZh: "DPO β", labelEn: "DPO beta", placeholder: "0.1", default: "0.1" },
   ],
   export_gguf: [{ key: "outtype", labelZh: "输出类型", labelEn: "Output type", kind: "select", default: "f16", options: [{ value: "f16", labelZh: "FP16", labelEn: "FP16" }, { value: "bf16", labelZh: "BF16", labelEn: "BF16" }, { value: "q8_0", labelZh: "INT8 量化 (q8_0)", labelEn: "INT8 q8_0" }, { value: "q4_0", labelZh: "INT4 量化 (q4_0)", labelEn: "INT4 q4_0" }, { value: "q4_K_S", labelZh: "K-quant (q4_K_S)", labelEn: "q4_K_S" }, { value: "q4_K_M", labelZh: "K-quant (q4_K_M)", labelEn: "q4_K_M" }] }],
   llm_quantize: [
@@ -138,7 +141,7 @@ const METHOD_PARAMS: Record<CompressionMethod, ParamDef[]> = {
   ],
 }
 
-const ARTIFACT_INFO: Record<string, { zh: string; en: string; items: [string, string, string][] }> = {
+export const ARTIFACT_INFO: Record<string, { zh: string; en: string; items: [string, string, string][] }> = {
   llm_quantize: {
     zh: "LLM weight-only 量化（OpenVINO IR）",
     en: "LLM weight-only quantization (OpenVINO IR)",
@@ -756,6 +759,16 @@ function CompressionsPage() {
                     </td>
                     <td className="lb-td">
                       <div className="flex items-center justify-end gap-1.5">
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          aria-label={t("任务详情", "Task details")}
+                          onClick={() =>
+                            navigate({ to: "/lab/task/$taskId", params: { taskId: task.id } })
+                          }
+                        >
+                          <FileText size={14} />
+                        </Button>
                         {task.status === "succeeded" && task.method === "llm_quantize" && (
                           <Button
                             size="sm"
