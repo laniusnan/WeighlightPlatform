@@ -129,7 +129,7 @@ const METHOD_PARAMS: Record<CompressionMethod, ParamDef[]> = {
     { key: "max_new", labelZh: "采样生成长度", labelEn: "Max generated tokens", placeholder: "32", default: "32" },
     { key: "hf_max_len", labelZh: "HF 最大序列长度（GPU/HF 模型）", labelEn: "HF max length (GPU/HF model)", placeholder: "128", default: "128" },
   ],
-  export_gguf: [{ key: "outtype", labelZh: "输出类型", labelEn: "Output type", kind: "select", default: "f16", options: [{ value: "f16", labelZh: "FP16", labelEn: "FP16" }, { value: "bf16", labelZh: "BF16", labelEn: "BF16" }, { value: "q8_0", labelZh: "INT8 量化 (q8_0)", labelEn: "INT8 q8_0" }, { value: "q4_0", labelZh: "INT4 量化 (q4_0)", labelEn: "INT4 q4_0" }] }],
+  export_gguf: [{ key: "outtype", labelZh: "输出类型", labelEn: "Output type", kind: "select", default: "f16", options: [{ value: "f16", labelZh: "FP16", labelEn: "FP16" }, { value: "bf16", labelZh: "BF16", labelEn: "BF16" }, { value: "q8_0", labelZh: "INT8 量化 (q8_0)", labelEn: "INT8 q8_0" }, { value: "q4_0", labelZh: "INT4 量化 (q4_0)", labelEn: "INT4 q4_0" }, { value: "q4_K_S", labelZh: "K-quant (q4_K_S)", labelEn: "q4_K_S" }, { value: "q4_K_M", labelZh: "K-quant (q4_K_M)", labelEn: "q4_K_M" }] }],
   llm_quantize: [
     { key: "engine", labelZh: "导出引擎", labelEn: "Engine", kind: "select", default: "auto", options: [{ value: "auto", labelZh: "自动（本地 HF 目录用 nncf）", labelEn: "Auto (nncf for local dirs)" }, { value: "nncf", labelZh: "NNCF 纯路径", labelEn: "NNCF only" }, { value: "optimum", labelZh: "optimum-intel", labelEn: "optimum-intel" }] },
     { key: "bits", labelZh: "量化位宽", labelEn: "Bits", kind: "select", default: "4", options: [{ value: "4", labelZh: "INT4", labelEn: "INT4" }, { value: "8", labelZh: "INT8", labelEn: "INT8" }] },
