@@ -8,6 +8,7 @@ import {
   apiDeleteTask,
   apiGetTask,
   apiGetTaskProgress,
+  apiReevaluateTask,
   apiRetryTask,
   taskDownloadPath,
 } from "@/services/api"
@@ -90,6 +91,24 @@ function TaskDetailPage() {
           {task.status === "failed" && (
             <Button size="sm" variant="outline" onClick={() => void apiRetryTask(task.id).then(load)}>
               <RotateCcw size={14} /> {t("重试", "Retry")}
+            </Button>
+          )}
+          {task.status === "succeeded" && Boolean((task.params as Record<string, unknown> | undefined)?.eval) && (
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() => void apiReevaluateTask(task.id, "eval").then(() => load())}
+            >
+              <RefreshCw size={14} /> {t("重新评估", "Re-run eval")}
+            </Button>
+          )}
+          {task.status === "succeeded" && Boolean((task.params as Record<string, unknown> | undefined)?.benchmark) && (
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() => void apiReevaluateTask(task.id, "benchmark").then(() => load())}
+            >
+              <RefreshCw size={14} /> {t("重新基准", "Re-run benchmark")}
             </Button>
           )}
           {task.status === "succeeded" && (

@@ -18,7 +18,7 @@ import uuid
 from arq.connections import RedisSettings
 
 from app.core.config import settings
-from app.jobs.jobs import pull_model, run_compression
+from app.jobs.jobs import pull_model, rerun_metrics_job, run_compression
 
 _WORKER_UUID = str(uuid.uuid4())
 _HEARTBEAT_KEY = f"platform:worker:{_WORKER_UUID}"
@@ -45,7 +45,7 @@ async def _heartbeat_loop(ctx: dict) -> None:
 
 
 class WorkerSettings:
-    functions = [pull_model, run_compression]
+    functions = [pull_model, run_compression, rerun_metrics_job]
     redis_settings = RedisSettings.from_dsn(str(settings.REDIS_URL))
     # CPU-only servers: run one compression job at a time to avoid CPU thrash.
     max_jobs = int(os.environ.get("WORKER_MAX_JOBS", "1"))

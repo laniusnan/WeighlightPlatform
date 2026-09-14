@@ -16,7 +16,7 @@ from app.jobs.compression import (
 )
 from app.jobs.download import download_file
 from app.jobs.storage import original_model_path, safe_extension
-from app.models import Model, ModelStatus
+from app.models import CompressionTask, Model, ModelStatus
 
 
 def _pull_model_sync(model_id: object) -> None:
@@ -104,3 +104,30 @@ async def run_compression(_ctx: object, task_id: object) -> None:
     except Exception as exc:  # defensive: never let a job die silently
         logger.exception("compression failed on backend: %s", exc)
         _mark_compression_failed(task_id, f"{type(exc).__name__}: {exc}")
+
+
+def _rerun_metrics_sync(task_id: object, kind: str) -> None:
+    """Re-run eval/benchmark for an existing task artifact (worker thread)."""
+    from app.jobs.compression import pick_artifact, rerun_metrics
+
+    with Session(engine) as session:
+        task = session.get(CompressionTask, task_id)
+        if task is None:
+            return
+        model = session.get(Model, task.model_id)
+        if model is None:
+            return
+        out_dir = task_dir(task.id)
+        artifact = pick_artifact(out_dir)
+        result = rerun_metrics(
+            model, artifact, kind, task.params or {}, out_dir, lambda *_: None
+        )
+        metrics = dict(task.metrics or {})
+        metrics[kind] = result
+        task.metrics = metrics
+        session.add(task)
+        session.commit()
+
+
+async def rerun_metrics_job(_ctx: object, task_id: object, kind: str) -> None:
+    await asyncio.to_thread(_rerun_metrics_sync, task_id, kind)
