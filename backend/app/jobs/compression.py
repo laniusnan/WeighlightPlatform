@@ -273,17 +273,47 @@ def _load_torch_module(file_path: Path) -> Any:
     )
 
 
+# Cache of imported ``arch.py`` modules, keyed by resolved path: keeping one
+# module (and therefore one class object) per architecture file makes model
+# re-serialisation inside a job work.
+_ARCH_MODULE_CACHE: dict[str, Any] = {}
+
+
 def _load_arch_module(arch_path: Path) -> Any | None:
-    """Import a companion ``arch.py`` file (returns ``None`` if absent)."""
+    """Import a companion ``arch.py`` file (returns ``None`` if absent).
+
+    The module is registered in ``sys.modules`` before execution - under the
+    synthetic spec name *and* under the file stem - and cached per resolved
+    path. Both are required for ``torch.save`` to keep working after a job
+    rewrites a model: pickled classes are resolved by ``__module__``/identity,
+    so re-executing ``arch.py`` on every load would fail with
+    ``Can't pickle <class '_uploaded_model_arch.X'>`` or
+    ``it's not the same object as _uploaded_model_arch.X``.
+    """
     import importlib.util
+    import sys
 
     if not arch_path.exists():
         return None
+
+    key = str(arch_path.resolve())
+    cached = _ARCH_MODULE_CACHE.get(key)
+    if cached is not None:
+        return cached
+
     spec = importlib.util.spec_from_file_location("_uploaded_model_arch", arch_path)
     if spec is None or spec.loader is None:
         return None
     module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+    sys.modules[spec.name] = module
+    if arch_path.stem and arch_path.stem not in sys.modules:
+        sys.modules[arch_path.stem] = module
+    try:
+        spec.loader.exec_module(module)
+    except Exception:  # pragma: no cover - bad arch.py
+        sys.modules.pop(spec.name, None)
+        raise
+    _ARCH_MODULE_CACHE[key] = module
     return module
 
 
@@ -845,6 +875,7 @@ def prune(
     pruned_filters = 0
     keep_lists: list[list[int]] = []
     slim_fallback_layers = 0
+    last_conv_original_out = conv_layers[-1].out_channels
 
     # Pair each Conv2d with the BatchNorm that immediately follows it
     # (in-order traversal) so BN-Slim and BN-trim never mismatch layers.
@@ -912,6 +943,34 @@ def prune(
             bn.running_var = bn.running_var[keep]
             bn.num_features = num_keep
 
+    # Propagate the *last* conv's channel selection into the classifier head.
+    # Structured pruning changes the feature width, so a head written as
+    # ``AdaptiveAvgPool2d(1) + Linear(C)`` (or ``Flatten + Linear(C*H*W)``) must
+    # drop the same channels - otherwise forward/ONNX export fails with
+    # "mat1 and mat2 shapes cannot be multiplied" and evaluation cannot run.
+    head_layers_adjusted = 0
+    last_keep = keep_lists[-1] if keep_lists else []
+    if last_keep and len(last_keep) != last_conv_original_out:
+        for module in net.modules():
+            if not isinstance(module, torch.nn.Linear):
+                continue
+            if module.in_features == last_conv_original_out:
+                # 1x1 pooled head: one input feature per channel.
+                module.weight.data = module.weight.data[:, last_keep]
+            elif module.in_features % last_conv_original_out == 0:
+                # Flattened head: channels are contiguous blocks of H*W.
+                spatial = module.in_features // last_conv_original_out
+                weight = module.weight.data.view(
+                    module.out_features, last_conv_original_out, spatial
+                )
+                module.weight.data = weight[:, last_keep, :].reshape(
+                    module.out_features, -1
+                )
+            else:
+                continue
+            module.in_features = module.weight.data.shape[1]
+            head_layers_adjusted += 1
+
     progress(60, "Saving pruned model...")
     out = out_dir / "model_pruned.pt"
     torch.save(net, out)
@@ -923,6 +982,8 @@ def prune(
         "prune_algorithm": algorithm,
         "params_after": _parameter_count(net),
     }
+    if head_layers_adjusted:
+        result_metrics["head_layers_adjusted"] = head_layers_adjusted
     if algorithm in ("bnslim", "autoslim") and slim_fallback_layers:
         result_metrics[f"{algorithm}_fallback_layers"] = slim_fallback_layers
     if params.get("export_onnx", True):
@@ -3453,6 +3514,27 @@ def _make_classifier(artifact: Path, image_size: int) -> Any:
 
     def preprocess(path: Path) -> np.ndarray:
         return _preprocess_image(path, image_size, image_size)
+
+    if artifact.is_dir():
+        # Structured jobs (prune / distill / QAT) return their whole output
+        # directory, so resolve the actual model file inside it: quantised /
+        # exported graphs first, then the torch checkpoints, then OpenVINO IR.
+        for name in (
+            "model_int8.onnx",
+            "model_qat.onnx",
+            "model_quantized.onnx",
+            "model_pruned.onnx",
+            "model_student.onnx",
+            "model_qat_float.onnx",
+            "model_qat_wq.onnx",
+            "model.onnx",
+            "model_pruned.pt",
+            "model_student.pt",
+            "model_qat.pt",
+        ):
+            candidate = artifact / name
+            if candidate.is_file():
+                return _make_classifier(candidate, image_size)
 
     if artifact.is_dir() and (artifact / "model.xml").exists():
         import openvino as ov

@@ -218,6 +218,49 @@ export const apiUploadDataset = async (file: File, name: string) => {
     .then((r) => r.data)
 }
 
+/** One server-local dataset candidate (open dataset already on the host). */
+export interface LocalDatasetInfo {
+  name: string
+  /** Path inside the container, e.g. /datasets-local/CIFAR10-train */
+  path: string
+  /** imagefolder | text | hf | archive | unknown */
+  kind: string
+  classes: number
+  class_names: string[]
+  samples: number
+  text_files: string[]
+  size_bytes: number
+  files: number
+  truncated: boolean
+  imported: boolean
+  dataset_id: string | null
+}
+
+export interface ImportLocalDatasetInput {
+  name?: string
+  server_path: string
+  /** reference (default, no copy) | copy (into platform storage, quota applies) */
+  mode?: "reference" | "copy"
+  description?: string
+}
+
+export const apiListLocalDatasetDirs = () =>
+  http
+    .get<{ roots: string[]; datasets: LocalDatasetInfo[] }>(
+      "/api/v1/datasets/local-dirs",
+    )
+    .then((r) => r.data)
+
+export const apiImportLocalDataset = (input: ImportLocalDatasetInput) =>
+  http
+    .post<DatasetPublic>("/api/v1/datasets/import-local", {
+      name: input.name ?? null,
+      server_path: input.server_path,
+      mode: input.mode ?? "reference",
+      description: input.description ?? null,
+    })
+    .then((r) => r.data)
+
 /* ----------------------------- 压缩任务 ------------------------------- */
 export interface ListTasksQuery {
   limit?: number

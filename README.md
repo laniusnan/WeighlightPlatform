@@ -19,6 +19,13 @@
 - `llm_finetune`：LoRA SFT —— CPU 内置微型字符 LM 原型；HuggingFace 模型走真实
   transformers 路径（需 CUDA，见下方 GPU 说明）
 - 数据集：支持 Excel/CSV 指令集自动解析（.xlsx/.csv/.tsv 前两列 → 问题=>回答）供微调
+- **本地开放数据集（服务器 / GPU 本地）**：`scripts/fetch-open-datasets.sh` 一键拉取
+  CIFAR-10/100、MNIST、Fashion-MNIST（默认走 HF 镜像 parquet，由镜像内 polars 读取，无需新增依赖；
+  `--source archive` 可回退原始 tar/idx 归档）并转成「按类图片目录」；平台侧
+  `GET /datasets/local-dirs` + `POST /datasets/import-local`（reference 模式不复制、不占配额，
+  删除仅注销记录、宿主数据不动；copy 模式快照进平台存储并计配额）→ 直接供数据驱动剪枝
+  （group_fisher/DMCP/AutoSlim）、QAT、蒸馏与分类评测消费。实测：CIFAR-10（10 类，5 万训练 +
+  1 万测试）→ prune(group_fisher) + ONNX 导出 + 1 万张分类评测全链路通过
 - `llm_quantize`：LLM（Qwen 等）INT4/INT8 量化导出为 OpenVINO IR（optimum-intel）
 - **精度评估**：图像分类 Top-1、YOLO mAP、LLM Perplexity（验证集 zip 自动下载）
 - **架构**：FastAPI + Redis + Arq 任务队列，压缩任务在独立 `worker` 容器中串行执行，

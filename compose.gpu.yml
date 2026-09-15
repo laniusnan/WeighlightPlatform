@@ -61,6 +61,7 @@ services:
       FRONTEND_HOST: ${FRONTEND_HOST:-http://localhost:8002}
       MODEL_STORAGE_PATH: /app/backend/models-storage
       LOCAL_MODEL_DIRS: /models-local
+      LOCAL_DATASET_DIRS: /datasets-local
       MAX_MODEL_DOWNLOAD_BYTES: ${MAX_MODEL_DOWNLOAD_BYTES:-10737418240}
       USER_STORAGE_QUOTA_BYTES: ${USER_STORAGE_QUOTA_BYTES:-53687091200}
     command:
@@ -81,6 +82,9 @@ services:
       - models-data:/app/backend/models-storage
       - ${HF_CACHE_HOST:-/home/lanius/.cache/huggingface}:/root/.cache/huggingface
       - ${LOCAL_MODEL_DIRS_HOST:-/home/lanius/.cache/huggingface/hub}:/models-local:ro
+      # Server-local open datasets (read-only), e.g. CIFAR-10 converted to
+      # per-class image folders -> registered by reference (no copy).
+      - ${LOCAL_DATASET_DIRS_HOST:-/home/lanius/Dataset}:/datasets-local:ro
     ports:
       - "8002:8000"
 
@@ -107,6 +111,7 @@ services:
       REDIS_URL: redis://redis:6379/0
       MODEL_STORAGE_PATH: /app/backend/models-storage
       LOCAL_MODEL_DIRS: /models-local
+      LOCAL_DATASET_DIRS: /datasets-local
       MAX_MODEL_DOWNLOAD_BYTES: ${MAX_MODEL_DOWNLOAD_BYTES:-10737418240}
       USER_STORAGE_QUOTA_BYTES: ${USER_STORAGE_QUOTA_BYTES:-53687091200}
       WORKER_MAX_JOBS: ${WORKER_MAX_JOBS:-1}
@@ -120,6 +125,7 @@ services:
       - models-data:/app/backend/models-storage
       - ${HF_CACHE_HOST:-/home/lanius/.cache/huggingface}:/root/.cache/huggingface
       - ${LOCAL_MODEL_DIRS_HOST:-/home/lanius/.cache/huggingface/hub}:/models-local:ro
+      - ${LOCAL_DATASET_DIRS_HOST:-/home/lanius/Dataset}:/datasets-local:ro
       - ${LLAMA_CPP_HOST:-/home/lanius/llama.cpp}:/opt/llama.cpp:ro
     deploy:
       resources:

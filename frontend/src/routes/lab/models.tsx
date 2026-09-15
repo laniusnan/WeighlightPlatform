@@ -9,6 +9,7 @@ import {
   Database,
   Download,
   FolderInput,
+  HardDrive,
   Link2,
   RefreshCw,
   Search,
@@ -33,14 +34,17 @@ import {
   apiDeleteDataset,
   apiDeleteModel,
   apiFetchAllModels,
-  apiListDatasets,
+  apiImportLocalDataset,
   apiImportLocalModel,
+  apiListDatasets,
+  apiListLocalDatasetDirs,
   apiListLocalModelDirs,
   apiListTasks,
   apiPullModel,
   apiUploadDataset,
   apiUploadModel,
   modelDownloadPath,
+  type LocalDatasetInfo,
 } from "@/services/api"
 import { downloadBlob } from "@/services/http"
 import { formatBytes, formatDateTime } from "@/services/format"
@@ -389,6 +393,192 @@ function ImportLocalModal({
 
 /* ------------------------------------------------------------------ */
 
+const DATASET_KIND_LABEL: Record<string, { zh: string; en: string }> = {
+  imagefolder: { zh: "按类图片", en: "ImageFolder" },
+  text: { zh: "文本 / 指令", en: "Text / JSONL" },
+  hf: { zh: "HF 数据集", en: "HF dataset" },
+  archive: { zh: "压缩包", en: "Archive" },
+  unknown: { zh: "未知", en: "Unknown" },
+}
+
+/**
+ * Import a dataset that is already prepared on the server host
+ * (/datasets-local, e.g. CIFAR-10 converted to per-class image folders).
+ * Reference mode copies nothing: the read-only host data is consumed in place.
+ */
+function ImportLocalDatasetModal({
+  open,
+  onClose,
+  onSuccess,
+}: {
+  open: boolean
+  onClose: () => void
+  onSuccess: () => void
+}) {
+  const { t } = useI18n()
+  const [entries, setEntries] = useState<LocalDatasetInfo[]>([])
+  const [roots, setRoots] = useState<string[]>([])
+  const [serverPath, setServerPath] = useState("")
+  const [name, setName] = useState("")
+  const [mode, setMode] = useState<"reference" | "copy">("reference")
+  const [description, setDescription] = useState("")
+  const [busy, setBusy] = useState(false)
+  const [scanning, setScanning] = useState(false)
+  const [error, setError] = useState("")
+
+  useEffect(() => {
+    if (!open) return
+    setError("")
+    setScanning(true)
+    apiListLocalDatasetDirs()
+      .then((res) => {
+        setEntries(res.datasets ?? [])
+        setRoots(res.roots ?? [])
+      })
+      .catch((e) => setError(e instanceof Error ? e.message : String(e)))
+      .finally(() => setScanning(false))
+  }, [open])
+
+  const submit = async (entry?: LocalDatasetInfo) => {
+    const target = (entry?.path ?? serverPath).trim()
+    if (!target) {
+      setError(t("请选择或填写服务器上的数据集目录", "Pick or type a dataset directory on the server"))
+      return
+    }
+    setBusy(true)
+    setError("")
+    try {
+      await apiImportLocalDataset({
+        name: (entry?.name ?? name.trim()) || undefined,
+        server_path: target,
+        mode,
+        description: description.trim() || undefined,
+      })
+      setName("")
+      setServerPath("")
+      setDescription("")
+      onSuccess()
+      onClose()
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <Modal
+      open={open}
+      onClose={onClose}
+      title={t("导入服务器本地数据集", "Import server-local dataset")}
+      footer={
+        <>
+          <Button variant="outline" onClick={onClose}>
+            {t("取消", "Cancel")}
+          </Button>
+          <Button onClick={() => void submit()} disabled={busy || !serverPath.trim()}>
+            {busy ? t("导入中…", "Importing…") : t("导入手填路径", "Import typed path")}
+          </Button>
+        </>
+      }
+    >
+      <div className="grid gap-4">
+        <div className="text-xs text-[var(--lb-muted)]">
+          {t(
+            "扫描只读目录：开放数据集（CIFAR-10/100、MNIST 等）按类目录即可直接用于剪枝 / QAT / 蒸馏 / 评估。",
+            "Scanning the read-only root. Open datasets (CIFAR-10/100, MNIST, ...) become per-class folders usable by prune / QAT / distill / eval.",
+          )}
+          {roots.length > 0 && <span className="lb-mono"> {roots.join(", ")}</span>}
+        </div>
+
+        {scanning ? (
+          <p className="text-sm text-[var(--lb-muted)]">{t("扫描中…", "Scanning…")}</p>
+        ) : entries.length === 0 ? (
+          <p className="text-sm text-[var(--lb-muted)]">
+            {t(
+              "未发现数据集：在服务器执行 scripts/fetch-open-datasets.sh 可一键下载并转换 CIFAR/MNIST。",
+              "Nothing found: run scripts/fetch-open-datasets.sh on the server to download + convert CIFAR/MNIST.",
+            )}
+          </p>
+        ) : (
+          <div className="max-h-64 overflow-auto">
+            <table className="lb-table">
+              <thead>
+                <tr>
+                  <th className="lb-th">{t("名称", "Name")}</th>
+                  <th className="lb-th">{t("类型", "Kind")}</th>
+                  <th className="lb-th">{t("类别 / 样本", "Classes / samples")}</th>
+                  <th className="lb-th">{t("大小", "Size")}</th>
+                  <th className="lb-th text-right">{t("操作", "Actions")}</th>
+                </tr>
+              </thead>
+              <tbody>
+                {entries.map((entry) => {
+                  const label = DATASET_KIND_LABEL[entry.kind] ?? DATASET_KIND_LABEL.unknown
+                  return (
+                    <tr key={entry.path} className="lb-tr">
+                      <td className="lb-td">
+                        <p className="font-medium text-[var(--lb-text)]">{entry.name}</p>
+                        <p className="lb-mono text-[11px] text-[var(--lb-muted)]">{entry.path}</p>
+                      </td>
+                      <td className="lb-td">
+                        <Pill tone="idle">{t(label.zh, label.en)}</Pill>
+                      </td>
+                      <td className="lb-td">
+                        <span className="lb-mono text-xs">
+                          {entry.classes || "-"} / {entry.samples || entry.files}
+                        </span>
+                      </td>
+                      <td className="lb-td">
+                        <span className="lb-mono text-xs">{formatBytes(entry.size_bytes)}</span>
+                      </td>
+                      <td className="lb-td">
+                        <div className="flex justify-end">
+                          {entry.imported ? (
+                            <Pill tone="succeeded">{t("已导入", "Imported")}</Pill>
+                          ) : (
+                            <Button size="sm" variant="outline" disabled={busy} onClick={() => void submit(entry)}>
+                              <HardDrive size={13} /> {t("导入", "Import")}
+                            </Button>
+                          )}
+                        </div>
+                      </td>
+                    </tr>
+                  )
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
+        <SelectField
+          label={t("导入方式", "Import mode")}
+          value={mode}
+          onChange={(e) => setMode(e.target.value as "reference" | "copy")}
+        >
+          <option value="reference">{t("引用（不复制，推荐）", "Reference (no copy, recommended)")}</option>
+          <option value="copy">{t("复制到平台存储（计入配额）", "Copy into platform storage (quota)")}</option>
+        </SelectField>
+        <TextField
+          label={t("或手填服务器目录（挂载为 /datasets-local）", "…or type a server directory (mounted at /datasets-local)")}
+          value={serverPath}
+          onChange={(e) => setServerPath(e.target.value)}
+          placeholder="/datasets-local/CIFAR10-train"
+        />
+        <TextField
+          label={t("数据集名称（可选）", "Dataset name (optional)")}
+          value={name}
+          onChange={(e) => setName(e.target.value)}
+          placeholder={t("默认取目录名", "Defaults to directory name")}
+        />
+        <TextAreaField label={t("描述（可选）", "Description (optional)")} value={description} onChange={(e) => setDescription(e.target.value)} />
+        {error && <p className="text-sm text-[var(--lb-danger)]">{error}</p>}
+      </div>
+    </Modal>
+  )
+}
+
+/* ------------------------------------------------------------------ */
+
 function ModelsPage() {
   const navigate = useNavigate()
   const { t } = useI18n()
@@ -402,6 +592,7 @@ function ModelsPage() {
   const [uploadOpen, setUploadOpen] = useState(false)
   const [pullOpen, setPullOpen] = useState(false)
   const [importOpen, setImportOpen] = useState(false)
+  const [datasetImportOpen, setDatasetImportOpen] = useState(false)
   const [datasets, setDatasets] = useState<DatasetPublic[]>([])
 
   const load = useCallback(async () => {
@@ -645,19 +836,24 @@ function ModelsPage() {
               {t("校准/蒸馏/评估/微调用：zip/tar 图片或文本包；也可直接上传 txt/csv/json/jsonl/xlsx/xls 文本或表格", "For calibration / distillation / eval / tuning. Archives (zip/tar) or plain text/table files (txt csv json jsonl xlsx xls)")}
             </p>
           </div>
-          <label className="lb-btn lb-btn--outline cursor-pointer">
-            <UploadCloud size={14} /> {t("上传数据集", "Upload dataset")}
-            <input
-              type="file"
-              accept=".zip,.tar,.tar.gz,.tgz,.gz,.txt,.csv,.json,.jsonl,.xlsx,.xls"
-              className="hidden"
-              onChange={(e) => {
-                const file = e.target.files?.[0]
-                if (file) void uploadDataset(file)
-                e.target.value = ""
-              }}
-            />
-          </label>
+          <div className="flex flex-wrap items-center gap-2">
+            <Button variant="outline" onClick={() => setDatasetImportOpen(true)}>
+              <HardDrive size={14} /> {t("从服务器导入", "Import from server")}
+            </Button>
+            <label className="lb-btn lb-btn--outline cursor-pointer">
+              <UploadCloud size={14} /> {t("上传数据集", "Upload dataset")}
+              <input
+                type="file"
+                accept=".zip,.tar,.tar.gz,.tgz,.gz,.txt,.csv,.json,.jsonl,.xlsx,.xls"
+                className="hidden"
+                onChange={(e) => {
+                  const file = e.target.files?.[0]
+                  if (file) void uploadDataset(file)
+                  e.target.value = ""
+                }}
+              />
+            </label>
+          </div>
         </div>
         {datasets.length === 0 ? (
           <p className="px-5 py-6 text-sm text-[var(--lb-muted)]">
@@ -716,6 +912,14 @@ function ModelsPage() {
         onClose={() => setImportOpen(false)}
         onSuccess={() => {
           setNotice(t("本地模型已导入并注册为就绪", "Local model imported and registered as Ready."))
+          void load()
+        }}
+      />
+      <ImportLocalDatasetModal
+        open={datasetImportOpen}
+        onClose={() => setDatasetImportOpen(false)}
+        onSuccess={() => {
+          setNotice(t("服务器本地数据集已注册，可直接用于压缩/评测任务", "Server-local dataset registered - usable by compression/eval tasks."))
           void load()
         }}
       />
