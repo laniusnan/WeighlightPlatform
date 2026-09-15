@@ -975,15 +975,36 @@ def prune(
     out = out_dir / "model_pruned.pt"
     torch.save(net, out)
 
+    # Sanity check: structured pruning rewires sequential conv chains plus the
+    # final classifier head. Branchy topologies (residual adds, multi-branch
+    # heads, attention) fall outside that scope, so a failing forward pass is
+    # reported in the metrics instead of shipping a silently broken artifact.
+    forward_status = "ok"
+    check_shape: list[int] | None = None
+    try:
+        check_shape = _parse_input_shape(params.get("input_shape"), [1, 3, 224, 224])
+        net.eval()
+        with torch.no_grad():
+            net(torch.randn(*check_shape))
+    except Exception as exc:  # noqa: BLE001 - reported, not raised
+        forward_status = (
+            f"{type(exc).__name__}: {exc}. Structured pruning supports sequential "
+            "CNNs (conv chains + classifier head); for branchy topologies use "
+            "quantize/sparsify or provide a pruned arch.py."
+        )[:400]
+
     # Also export to ONNX when the model is traceable.
     result_metrics: dict[str, Any] = {
         "total_filters": total_filters,
         "pruned_filters": pruned_filters,
         "prune_algorithm": algorithm,
         "params_after": _parameter_count(net),
+        "forward_check": forward_status,
     }
     if head_layers_adjusted:
         result_metrics["head_layers_adjusted"] = head_layers_adjusted
+    if forward_status != "ok":
+        result_metrics["topology_warning"] = True
     if algorithm in ("bnslim", "autoslim") and slim_fallback_layers:
         result_metrics[f"{algorithm}_fallback_layers"] = slim_fallback_layers
     if params.get("export_onnx", True):
@@ -3631,14 +3652,61 @@ def _eval_perplexity(
     progress(70, "Running perplexity evaluation...")
     text_url = eval_cfg.get("text_url")
     text_file = eval_cfg.get("text_file")
+    text_source = "built-in prompts"
     if text_url:
         from app.jobs.download import download_file
 
         dest = workspace / "eval_text.txt"
         download_file(text_url, dest)
         text = dest.read_text(encoding="utf-8")
+        text_source = f"text_url: {text_url}"
     elif text_file:
         text = Path(text_file).read_text(encoding="utf-8")
+        text_source = f"text_file: {text_file}"
+    elif eval_cfg.get("dataset_id"):
+        # Server-local (or uploaded) text corpus, e.g. wikitext2-raw-test:
+        # concatenate every text-ish file in the dataset directory, capped so a
+        # huge split cannot turn evaluation into an hours-long job.
+        data_dir = _dataset_dir_from_id(str(eval_cfg["dataset_id"]))
+        # Tokenising a multi-million-character corpus is pointless for a smoke
+        # evaluation: 100k chars (~25k tokens) is already a solid PPPL sample.
+        budget = int(eval_cfg.get("max_chars", 100_000))
+        chunks: list[str] = []
+        used = 0
+        for path in sorted(data_dir.rglob("*")):
+            if not path.is_file() or path.suffix.lower() not in {
+                ".txt", ".text", ".md", ".jsonl", ".json",
+            }:
+                continue
+            chunk = path.read_text(encoding="utf-8", errors="replace")
+            if path.suffix.lower() == ".jsonl":
+                # Keep only the text-ish payload of instruction/preference rows.
+                lines = []
+                for line in chunk.splitlines():
+                    try:
+                        row = json.loads(line)
+                    except ValueError:
+                        continue
+                    if isinstance(row, dict):
+                        lines.append(
+                            " ".join(
+                                str(row[key])
+                                for key in ("text", "content", "instruction", "output", "prompt", "chosen")
+                                if row.get(key)
+                            )
+                        )
+                chunk = "\n".join(lines)
+            chunks.append(chunk[: max(budget - used, 0)])
+            used += len(chunks[-1])
+            if used >= budget:
+                break
+        if not chunks:
+            raise ValueError(
+                f"Dataset {eval_cfg['dataset_id']} contains no readable text files "
+                "(.txt/.jsonl/...)"
+            )
+        text = "\n".join(chunks)
+        text_source = f"dataset_id: {eval_cfg['dataset_id']} ({len(text)} chars)"
     else:
         # Lightweight, zero-dependency fallback: built-in bilingual prompts so
         # “④ LLM Perplexity” works even without an external dataset. Results
@@ -3667,7 +3735,13 @@ def _eval_perplexity(
         from app.jobs.llm_runtime_nncf import NncfChatModel
 
         runner = NncfChatModel(str(model_dir))
-        ids = np.asarray([tokenizer.encode(text)], dtype=np.int64)
+        # This path is a *single* forward pass, so keep the window small: feeding
+        # a whole corpus would allocate tens of GB of attention buffers.
+        window = max(int(eval_cfg.get("max_length", 512)), 8)
+        encoded = tokenizer(
+            text, return_tensors="np", truncation=True, max_length=window
+        )
+        ids = np.asarray(encoded["input_ids"], dtype=np.int64)
         logits = np.asarray(runner._compiled([ids, np.ones_like(ids)])[0])[0]
         count = ids.shape[1]
         nll = 0.0
@@ -3681,7 +3755,8 @@ def _eval_perplexity(
             "type": "perplexity",
             "perplexity": round(_math.exp(nll / max(count - 1, 1)), 3),
             "samples": int(count),
-            "note": "engine=nncf light eval (built-in prompts, no external dataset)",
+            "text_source": text_source,
+            "note": "engine=nncf light eval (single forward pass over the eval text)",
         }
 
     ov_model = OVModelForCausalLM.from_pretrained(
@@ -3775,9 +3850,11 @@ class _MicroBlock(torch.nn.Module):
 class _MicroGPT(torch.nn.Module):
     """Tiny causal character LM used by the CPU LoRA SFT prototype."""
 
-    def __init__(self, vocab: int, dim: int = 48, heads: int = 4, layers: int = 3) -> None:
+    def __init__(
+        self, vocab: int, dim: int = 48, heads: int = 4, layers: int = 3, block: int = 128
+    ) -> None:
         super().__init__()
-        self.block = 128
+        self.block = max(int(block), 8)
         self.token_emb = torch.nn.Embedding(vocab, dim)
         self.pos_emb = torch.nn.Embedding(self.block, dim)
         self.blocks = torch.nn.ModuleList([_MicroBlock(dim, heads) for _ in range(layers)])
@@ -4037,15 +4114,35 @@ def _lora_sft_train(
     def _encode(text: str) -> list[int]:
         return [bos] + [idx[c] for c in text]
 
-    samples: list[tuple[list[int], list[int], list[bool]]] = []
-    for q, a in pairs:
-        full = _encode(q) + [sep] + [idx[c] for c in a] + [eos]
-        flags = [False] * (len(_encode(q)) + 1) + [True] * (len(a) + 1)
-        samples.append((full[:-1], full[1:], flags[1:]))
-
     progress(15, f"Building micro LM (vocab={len(vocab) + 4}, samples={len(pairs)})...")
     torch.manual_seed(1234)
-    gpt = _MicroGPT(len(vocab) + 4)
+    gpt = _MicroGPT(len(vocab) + 4, block=int(params.get("context", 128)))
+    context = gpt.block
+
+    samples: list[tuple[list[int], list[int], list[bool]]] = []
+    clipped = 0
+    for q, a in pairs:
+        q_ids = _encode(q)
+        a_ids = [idx[c] for c in a]
+        # The micro LM has a fixed context window; external instruction corpora
+        # (Alpaca, GSM8K, ...) are much longer, so trim the prompt and keep as
+        # much of the answer as fits instead of indexing past pos_emb.
+        room = context - len(a_ids) - 2
+        if room < 1:
+            q_ids, a_ids = q_ids[:1], a_ids[: max(context - 3, 1)]
+            clipped += 1
+        elif len(q_ids) > room:
+            q_ids = q_ids[:room]
+            clipped += 1
+        full = q_ids + [sep] + a_ids + [eos]
+        flags = [False] * (len(q_ids) + 1) + [True] * (len(a_ids) + 1)
+        samples.append((full[:-1], full[1:], flags[1:]))
+    if clipped:
+        progress(
+            18,
+            f"Clipped {clipped}/{len(pairs)} pairs to the {context}-char context window",
+        )
+
     for p in gpt.parameters():
         p.requires_grad = False
     lora_layers = _lora_replace(gpt, lora_rank)
