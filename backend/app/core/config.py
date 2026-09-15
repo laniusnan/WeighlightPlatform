@@ -54,6 +54,12 @@ class Settings(BaseSettings):
     # Multiple paths separated by ';'. Containers mount host model folders here
     # (compose.cpu.yml: /home/zhangxuefei/Model -> /models-local).
     LOCAL_MODEL_DIRS: str = "/models-local"
+    # Same idea for open datasets that are already on the server
+    # (CIFAR-10/100, MNIST, wikitext-2, ...). Containers mount the host dataset
+    # folder here read-only (compose.cpu.yml:
+    # /home/zhangxuefei/Dataset -> /datasets-local) and /datasets/import-local
+    # registers entries either by reference (no copy) or by copy.
+    LOCAL_DATASET_DIRS: str = "/datasets-local"
 
     @field_validator("DATABASE_URL", mode="before")
     @classmethod
