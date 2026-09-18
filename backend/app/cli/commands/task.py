@@ -7,6 +7,7 @@ progress, fetches artifacts and produces a deployment bundle.
 from __future__ import annotations
 
 import argparse
+import json
 import pathlib
 from typing import Any
 
@@ -48,6 +49,18 @@ def register(subparsers: Any) -> None:
     remove.add_argument("--yes", action="store_true", help="do not ask for confirmation")
     common.add_global_flags(remove)
     remove.set_defaults(handler=_delete)
+
+    retry = sub.add_parser("retry", help="re-run a failed/canceled task with the same params")
+    retry.add_argument("task_id")
+    common.add_global_flags(retry)
+    retry.set_defaults(handler=_retry)
+
+    reevaluate = sub.add_parser("reevaluate", help="re-run eval/benchmark for a finished task")
+    reevaluate.add_argument("task_id")
+    reevaluate.add_argument("--kind", choices=("eval", "benchmark"), default="eval",
+                            help="which stored config to re-run (default eval)")
+    common.add_global_flags(reevaluate)
+    reevaluate.set_defaults(handler=_reevaluate)
 
 
 def _status(args: argparse.Namespace) -> dict[str, Any]:
@@ -123,6 +136,45 @@ def _download(args: argparse.Namespace, kind: str = "download") -> dict[str, Any
         "size_bytes": pathlib.Path(path).stat().st_size,
     }
     printer.emit(payload)
+    return payload
+
+
+def _retry(args: argparse.Namespace) -> dict[str, Any]:
+    """Re-submit a failed/canceled task with the same method + params."""
+    client = common.ApiClient()
+    printer = common.Printer(getattr(args, "json", False))
+    created = client.post(f"/api/v1/compressions/{args.task_id}/retry")
+    if not isinstance(created, dict) or "id" not in created:
+        raise common.fail(f"unexpected retry response: {created}", common.EXIT_ERROR)
+    printer.note(f"retried  task_id={created['id']}  status={created.get('status')}")
+    task = created
+    if args.watch:
+        interval = common.resolve_float("poll-interval", args.poll_interval, 5.0)
+        timeout = common.resolve_float("wait-timeout", args.wait_timeout, 1800.0)
+
+        def on_tick(current: dict[str, Any]) -> None:
+            if current.get("status") in TERMINAL:
+                printer.note(f"  {current.get('status')} {current.get('progress')}%")
+
+        task = common.wait_for_task(client, created["id"], interval, timeout, on_tick)
+    payload = common.task_payload(task)
+    printer.emit(payload, common.render_task)
+    return payload
+
+
+def _reevaluate(args: argparse.Namespace) -> dict[str, Any]:
+    """Re-run the stored eval / benchmark config of a finished task."""
+    client = common.ApiClient()
+    printer = common.Printer(getattr(args, "json", False))
+    result = client.post(f"/api/v1/compressions/{args.task_id}/reevaluate", {"kind": args.kind})
+    payload = {"task_id": args.task_id, "kind": args.kind, **(result or {})}
+    printer.note(f"queued {args.kind} re-run for task {args.task_id}")
+    if args.watch:
+        interval = common.resolve_float("poll-interval", args.poll_interval, 5.0)
+        timeout = common.resolve_float("wait-timeout", args.wait_timeout, 1800.0)
+        task = common.wait_for_task(client, args.task_id, interval, timeout)
+        payload = common.task_payload(task)
+    printer.emit(payload, None if args.watch else lambda _: json.dumps(payload, ensure_ascii=False, indent=2))
     return payload
 
 

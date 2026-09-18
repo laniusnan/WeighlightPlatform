@@ -8,16 +8,38 @@
 
 ## 1. 统一入口
 
+**五种等价写法**（任选；推荐 ①，无需安装、无需 `-m`）：
+
 ```bash
-# ① 模块方式（任意已安装环境可用，cwd 必须是 backend/）
-cd backend
-python -m app.cli.compression <subcommand> [options]
+# ① 仓库根目录的单文件启动器（最像 `python xxx.py --参数`）
+python compression.py quantize --model Qwen2.5-0.5B --method nncf_int4 --bits 4 --watch --json
 
-# ② 仓库内便捷包装（自动挑选 venv，无需 cd）
-scripts/compression <subcommand> [options]
+# ② 直接执行 CLI 源文件（等价，路径写在命令行里即可）
+python backend/app/cli/compression.py quantize --model Qwen2.5-0.5B --method nncf_int4 --watch
 
-# ③ 容器内（生产环境常用）
-docker compose -f compose.cpu.yml exec backend python -m app.cli.compression <subcommand>
+# ③ 模块方式（cwd 必须是 backend/）
+cd backend && python -m app.cli.compression quantize --model Qwen2.5-0.5B --method nncf_int4 --watch
+
+# ④ 安装后的控制台脚本（uv sync / 镜像重建后可用；无需 cd、无需 .py）
+compression quantize --model Qwen2.5-0.5B --method nncf_int4 --watch
+
+# ⑤ 仓库内 bash 包装（自动挑选 venv）
+scripts/compression quantize --model Qwen2.5-0.5B --method nncf_int4 --watch
+
+# 容器内（生产环境常用）——镜像里已包含 CLI
+docker exec app-backend-1 python -m app.cli.compression task list --limit 5
+docker exec app-backend-1 python /app/backend/app/cli/compression.py task list   # 同上
+```
+
+> 实现说明：`compression.py` 与 `backend/app/cli/compression.py` 都能「既作为包又被直接执行」。
+> 由于文件名 `compression.py` 会遮蔽**标准库 `compression` 包**（`bz2`/`shutil` 依赖），
+> 直接执行时两者都会先把自身所在目录从 `sys.path` 移除，再挂上 `backend/`，因此不会踩坑。
+
+**通用参数位置**：连接类参数（`--api/--token/--email/--password/--json`）写在子命令前或后都行。
+
+```bash
+python compression.py --json task list          # 等价于
+python compression.py task list --json
 ```
 
 ### 子命令总览
@@ -268,6 +290,8 @@ compression export --format deploy_zip --task <task_uuid> --out-dir ./exports
 | `task download` | `<task_id>` `--out-dir` | str | 是 / 否 | `./exports` | 下载产物 zip（目录产物自动打包） |
 | `task deploy` | `<task_id>` `--out-dir` | str | 是 / 否 | `./exports` | 下载部署包（Dockerfile + `serve.py` + `model_card.json` + `model/`） |
 | `task delete` | `<task_id>` `--yes` | flag | 是 / 否 | 交互确认 | 删除任务（运行中先取消） |
+| `task retry` | `<task_id>` | str | **是** | — | 用相同方法/参数重跑失败或取消的任务；配合 `--watch` 等待新任务 |
+| `task reevaluate` | `<task_id>` `--kind` | str / `eval\|benchmark` | 是 / 否 | `eval` | 重跑任务内已保存的评估 / 基准配置（`--watch` 等待完成） |
 
 ```bash
 compression task list --status succeeded --limit 10
@@ -399,4 +423,22 @@ CLI 与 HTTP API 一一对应（推荐：**Web 请求用 API，批处理/运维�
 
 > 生产部署建议使用 `deploy_zip` 产物（`Dockerfile` + `serve.py` + `model_card.json` + `model/`），
 > 与推理模块现有容器化流程一致；`model_card.json` 内含 `method/params/metrics`，可直接入库做版本追踪。
+
+### 6.1 直接可用的路由文件（drop-in）
+
+不想自己写这段对接代码的话，用 [`examples/inference_module/`](../examples/inference_module/README.md)：
+一个 FastAPI 路由文件（`api/compression_proxy.py`）+ 一份配置 + 验证脚本，覆盖
+「方法目录 / 资产盘点 / 提交 / 轮询 / 推理 / 产物下载 / 部署包 / 重试」全部接口：
+
+```bash
+pip install -r examples/inference_module/requirements.txt
+export COMPRESSION_API_BASE=http://10.110.1.36:8001/api/v1
+export COMPRESSION_EMAIL=... COMPRESSION_PASSWORD=...
+# 你网站里：
+#   from api.compression_proxy import router as compression_router
+#   app.include_router(compression_router)
+```
+
+实测（本仓库真机）：提交剪枝任务 → 轮询 `ready=true` → `/infer` 返回 `output_shape [1,10]` →
+产物 zip 449,585 B / 部署包 451,391 B，15 项断言全绿。
 

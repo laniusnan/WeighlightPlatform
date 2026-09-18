@@ -52,6 +52,12 @@
   [`docs/compression-cli.md`](docs/compression-cli.md)、环境
   [`docs/compression-env.md`](docs/compression-env.md)、端到端
   [`examples/compression-demo.md`](examples/compression-demo.md)
+- **命令行用法（五种等价入口）**：`python compression.py <子命令> --参数…`（推荐，免安装）·
+  `python backend/app/cli/compression.py …` · `python -m app.cli.compression …`（cwd=backend）·
+  `compression …`（包安装后的控制台脚本）· `scripts/compression …`（bash 包装）
+- **推理模块接入包（drop-in）**：[`examples/inference_module/`](examples/inference_module/README.md)
+  —— FastAPI 路由（方法目录/提交/轮询/推理/产物下载/部署包/重试）+ 配置 + 实测脚本，
+  不依赖平台代码，仅 `fastapi`+`httpx`+`pydantic`
 
 ## Technology Stack and Features
 
