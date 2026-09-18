@@ -3077,8 +3077,51 @@ def llm_quantize(
 # ---------------------------------------------------------------------------
 # Benchmark (CPU latency / throughput of original vs compressed)
 # ---------------------------------------------------------------------------
+# Concrete model files that a task output directory may contain, in the order
+# the inference/benchmark layer should prefer them (quantised exports first,
+# then the torch checkpoints). ``model.xml`` keeps the directory form (IR).
+_ARTIFACT_CANDIDATES = (
+    "model_int8.onnx",
+    "model_qat.onnx",
+    "model_quantized.onnx",
+    "model_pruned.onnx",
+    "model_student.onnx",
+    "model_qat_float.onnx",
+    "model_qat_wq.onnx",
+    "model.onnx",
+    "model_pruned.pt",
+    "model_student.pt",
+    "model_qat.pt",
+    "model.pt",
+)
+
+
+def resolve_artifact_file(path: Path) -> Path:
+    """Resolve a task output directory to the concrete model file inside it.
+
+    Jobs such as ``prune`` / ``qat`` / ``distill`` return their whole task
+    directory as the artifact; inference and benchmarking need a loadable file,
+    so the best candidate inside is selected. OpenVINO IR directories keep their
+    directory form (they are addressed by ``model.xml``).
+    """
+    if not path.is_dir():
+        return path
+    if (path / "model.xml").exists():
+        return path
+    for name in _ARTIFACT_CANDIDATES:
+        candidate = path / name
+        if candidate.is_file():
+            return candidate
+    for pattern in ("*.onnx", "*.pt", "*.pth"):
+        for candidate in sorted(path.glob(pattern)):
+            if candidate.is_file():
+                return candidate
+    return path
+
+
 def _make_runner(path: Path) -> Any:
     """Return a function that runs a model on a numpy input array."""
+    path = resolve_artifact_file(path)
     if path.is_dir() and (path / "model.xml").exists():
         import openvino as ov
 
@@ -3540,22 +3583,7 @@ def _make_classifier(artifact: Path, image_size: int) -> Any:
         # Structured jobs (prune / distill / QAT) return their whole output
         # directory, so resolve the actual model file inside it: quantised /
         # exported graphs first, then the torch checkpoints, then OpenVINO IR.
-        for name in (
-            "model_int8.onnx",
-            "model_qat.onnx",
-            "model_quantized.onnx",
-            "model_pruned.onnx",
-            "model_student.onnx",
-            "model_qat_float.onnx",
-            "model_qat_wq.onnx",
-            "model.onnx",
-            "model_pruned.pt",
-            "model_student.pt",
-            "model_qat.pt",
-        ):
-            candidate = artifact / name
-            if candidate.is_file():
-                return _make_classifier(candidate, image_size)
+        artifact = resolve_artifact_file(artifact)
 
     if artifact.is_dir() and (artifact / "model.xml").exists():
         import openvino as ov

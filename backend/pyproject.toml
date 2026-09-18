@@ -56,6 +56,12 @@ dev = [
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
+[project.scripts]
+# Console script: `compression quantize --model ... --method nncf_int4 --watch`
+# (takes effect after `uv sync` / image rebuild; the script form
+#  `python compression.py ...` works without any installation)
+compression = "app.cli.compression:main"
+
 [tool.mypy]
 strict = true
 exclude = ["venv", ".venv", "alembic"]

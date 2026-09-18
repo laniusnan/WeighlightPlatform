@@ -94,6 +94,9 @@ def predict(
     import time
 
     path = _resolve_artifact(session, current_user, body.task_id, body.model_id)
+    from app.jobs.compression import resolve_artifact_file
+
+    path = resolve_artifact_file(path)
     from app.core.config import settings
 
     if str(settings.COMPUTE_BACKEND).strip().lower() == "gpu":

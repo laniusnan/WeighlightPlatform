@@ -29,7 +29,23 @@ import os
 import sys
 from typing import Sequence
 
-from .commands import common, distill, export, finetune, inventory, prune, quantize, task as task_cmd
+try:  # `python -m app.cli.compression ...` (package import)
+    from .commands import common, distill, export, finetune, inventory, prune, quantize
+    from .commands import task as task_cmd
+except ImportError:  # `python backend/app/cli/compression.py ...` (plain script)
+    import pathlib
+
+    # This file is called ``compression.py``: when executed as a script its own
+    # directory lands on ``sys.path[0]`` and would shadow the **stdlib**
+    # ``compression`` package (imported by bz2 -> shutil -> tempfile -> urllib).
+    # Drop that directory, then make ``backend/`` importable instead.
+    _SELF_DIR = pathlib.Path(__file__).resolve().parent
+    sys.path[:] = [p for p in sys.path if pathlib.Path(p or ".").resolve() != _SELF_DIR]
+    _BACKEND_DIR = _SELF_DIR.parents[1]
+    if str(_BACKEND_DIR) not in sys.path:
+        sys.path.insert(0, str(_BACKEND_DIR))
+    from app.cli.commands import common, distill, export, finetune, inventory, prune, quantize
+    from app.cli.commands import task as task_cmd
 
 __all__ = ["main", "build_parser"]
 
