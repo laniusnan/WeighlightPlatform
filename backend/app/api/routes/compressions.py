@@ -293,7 +293,14 @@ def export_deployment_package(
     model_dir = pkg / "model"
     model_dir.mkdir(exist_ok=True)
     if artifact.is_dir():
-        shutil.copytree(artifact, model_dir, dirs_exist_ok=True)
+        # Some jobs (llm_quantize / openvino_int8) return the *task directory*
+        # itself as the artifact, while the bundle is being built inside it
+        # (`<task>/deploy/...`): copying it verbatim would recurse into the
+        # destination forever. Skip the bundle we are creating in that case.
+        ignore = None
+        if model_dir.resolve().is_relative_to(artifact.resolve()):
+            ignore = shutil.ignore_patterns("deploy", "deploy_package.zip", "*.zip")
+        shutil.copytree(artifact, model_dir, dirs_exist_ok=True, ignore=ignore)
     else:
         shutil.copy2(artifact, model_dir / artifact.name)
 

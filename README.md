@@ -45,6 +45,13 @@
   网络受限的服务器推荐 `scripts/cpu-image-ship.sh`：**本地构建镜像 → 压缩传输（zstd/gzip）→
   服务器 `docker load` + `compose up -d --no-build`**（保留 `backend:latest-prev` 回滚标签），
   彻底避开服务器上 `uv sync` 拉取 2GB 依赖时的网络抖动
+- **压缩 CLI（供推理模块/运维调用）**：`backend/app/cli/`（入口 `python -m app.cli.compression`，
+  或仓库包装 `scripts/compression <subcommand>`）。子命令 `quantize / prune / distill / finetune /
+  export / task / models / datasets / local-datasets`；异步提交即返回 `task_id`，`--watch` 轮询到终态；
+  `--json` 输出机器可读结构；所有参数可用 `COMPRESSION_*` 环境变量覆盖。文档：
+  [`docs/compression-cli.md`](docs/compression-cli.md)、环境
+  [`docs/compression-env.md`](docs/compression-env.md)、端到端
+  [`examples/compression-demo.md`](examples/compression-demo.md)
 
 ## Technology Stack and Features
 
