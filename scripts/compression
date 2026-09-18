@@ -1,0 +1,36 @@
+#!/usr/bin/env bash
+# ============================================================================
+# Convenience wrapper: `scripts/compression <subcommand> [options]`
+#
+# Equivalent to `cd backend && python -m app.cli.compression <subcommand>`.
+# Keeps the CLI usable without remembering the module path, and lets the
+# inference module call it directly (e.g. from a subprocess in a service).
+#
+#   scripts/compression quantize --model Qwen2.5-0.5B --method nncf_int4 --watch
+#   scripts/compression task status <task_id> --json
+#
+# Environment:
+#   COMPRESSION_PYTHON  python interpreter to use (default: backend venv, else python3)
+#   COMPRESSION_API     API base URL (default http://127.0.0.1:8001)
+# ============================================================================
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+BACKEND_DIR="$ROOT_DIR/backend"
+
+pick_python() {
+  if [[ -n "${COMPRESSION_PYTHON:-}" ]]; then
+    echo "$COMPRESSION_PYTHON"; return
+  fi
+  for candidate in \
+    "$ROOT_DIR/.venv/bin/python" \
+    "$BACKEND_DIR/.venv/bin/python" \
+    "$ROOT_DIR/.venv311/bin/python"; do
+    [[ -x "$candidate" ]] && { echo "$candidate"; return; }
+  done
+  command -v python3
+}
+
+PYTHON="$(pick_python)"
+cd "$BACKEND_DIR"
+exec "$PYTHON" -m app.cli.compression "$@"
