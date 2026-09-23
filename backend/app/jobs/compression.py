@@ -166,6 +166,8 @@ def _dispatch(
         return export_onnx(model, params, out_dir, progress)
     if method == CompressionMethod.quantize_onnx.value:
         return quantize_onnx(model, params, out_dir, progress)
+    if method == CompressionMethod.quantize_onnx_int4.value:
+        return quantize_onnx_int4(model, params, out_dir, progress)
     if method == CompressionMethod.quantize_onnx_static.value:
         return quantize_onnx_static(model, params, out_dir, progress)
     if method == CompressionMethod.openvino_int8.value:
@@ -257,7 +259,12 @@ def _load_torch_module(file_path: Path) -> Any:
         # state_dict support: rebuild the module from the uploaded architecture.
         state_dict = _find_state_dict(checkpoint)
         if state_dict is not None:
-            net = _rebuild_from_state_dict(state_dict, arch_classes)
+            net = _rebuild_from_state_dict(
+                state_dict,
+                arch_classes,
+                arch_module=arch_module,
+                config=checkpoint.get("config") if isinstance(checkpoint.get("config"), dict) else None,
+            )
             if net is not None:
                 return net
             raise ValueError(
@@ -366,7 +373,7 @@ def _register_arch_for_pickle(
 def _find_state_dict(checkpoint: dict[str, Any]) -> dict[str, Any] | None:
     """Locate a plain state_dict inside a checkpoint dict, if any."""
 
-    for key in ("model", "net", "module", "model_ema", "state_dict"):
+    for key in ("model", "net", "module", "model_ema", "state_dict", "model_state_dict"):
         candidate = checkpoint.get(key)
         if isinstance(candidate, dict) and _looks_like_state_dict(candidate):
             return candidate
@@ -382,16 +389,50 @@ def _looks_like_state_dict(obj: dict[str, Any]) -> bool:
 
 
 def _rebuild_from_state_dict(
-    state_dict: dict[str, Any], arch_classes: dict[str, type]
+    state_dict: dict[str, Any],
+    arch_classes: dict[str, type],
+    arch_module: Any | None = None,
+    config: dict[str, Any] | None = None,
 ) -> Any | None:
-    """Instantiate the model from the uploaded architecture and load the weights."""
+    """Instantiate the model from the uploaded architecture and load the weights.
+
+    Three strategies, in order:
+
+    1. ``cls()`` with no arguments (arch.py defines the class and defaults).
+    2. ``arch_module.build_model(config)`` — third-party packages commonly ship
+       ``{"config": {...}, "model_state_dict": ...}`` plus a factory function
+       (e.g. tabular/nlp models whose ``__init__`` needs ``num_features``).
+    3. any class whose constructor accepts only default-able kwargs.
+    """
+    if state_dict and all(str(key).startswith("module.") for key in state_dict):
+        # DataParallel/DDP checkpoints store "module." prefixed keys.
+        state_dict = {str(key)[len("module."):]: value for key, value in state_dict.items()}
+
+    def _load(candidate: Any) -> Any | None:
+        if candidate is None:
+            return None
+        try:
+            candidate.load_state_dict(state_dict)
+            return candidate
+        except Exception:
+            return None
+
     for cls in arch_classes.values():
         try:
-            net = cls()
-            net.load_state_dict(state_dict)
-            return net
+            net = _load(cls())
         except Exception:
             continue
+        if net is not None:
+            return net
+
+    factory = getattr(arch_module, "build_model", None) if arch_module is not None else None
+    if callable(factory) and isinstance(config, dict):
+        try:
+            net = _load(factory(config))
+        except Exception:
+            net = None
+        if net is not None:
+            return net
     return None
 
 
@@ -483,8 +524,126 @@ def export_onnx(
 
 
 # ---------------------------------------------------------------------------
+# quantize_onnx_int4: ONNX INT4 weight-only quantization (onnxruntime MatMulNBits)
+# ---------------------------------------------------------------------------
+def quantize_onnx_int4(
+    model: Model,
+    params: dict[str, Any],
+    out_dir: Path,
+    progress: ProgressCallback,
+) -> tuple[Path, dict[str, Any]]:
+    """INT4 weight-only quantization for transformer/LLM ONNX graphs.
+
+    Weights are stored as 4-bit blocks (MatMulNBits), activations stay fp32 -
+    the standard "推理前压缩" recipe for CPU serving of attention models. Typical
+    size reduction is ~8x on weight tensors with <1% accuracy loss for block_size
+    32/64 and symmetric quantization; smaller block sizes trade size for accuracy.
+    """
+    import onnx
+    from onnxruntime.quantization.matmul_nbits_quantizer import (
+        DefaultWeightOnlyQuantConfig,
+        MatMulNBitsQuantizer,
+    )
+    from onnxruntime.quantization.shape_inference import quant_pre_process
+
+    if model.file_path is None:
+        raise ValueError("Model has no local file")
+    src = Path(model.file_path)
+    if src.suffix.lower() != ".onnx":
+        raise ValueError("quantize_onnx_int4 requires an ONNX model, got: " + src.name)
+
+    block_size = int(params.get("block_size") or params.get("group_size") or 32)
+    symmetric = str(params.get("sym", "true")).strip().lower() not in {"0", "false", "no", "off"}
+    accuracy_level = int(params.get("accuracy_level", 4))
+
+    progress(10, "Running shape inference (INT4)...")
+    preprocessed = out_dir / "preprocessed_int4.onnx"
+    try:
+        quant_pre_process(str(src), str(preprocessed))
+        source_model = onnx.load(str(preprocessed))
+    except Exception:
+        # Some graphs (e.g. with external data or unusual ops) can't be
+        # pre-processed; MatMulNBitsQuantizer can still handle the raw graph.
+        preprocessed.unlink(missing_ok=True)
+        preprocessed = None
+        source_model = onnx.load(str(src))
+
+    progress(40, f"Quantizing MatMul/Gemm weights to INT4 (block={block_size})...")
+    quantizer = MatMulNBitsQuantizer(
+        source_model,
+        block_size=block_size,
+        is_symmetric=symmetric,
+        accuracy_level=accuracy_level,
+        algo_config=DefaultWeightOnlyQuantConfig(
+            block_size=block_size,
+            is_symmetric=symmetric,
+            accuracy_level=accuracy_level,
+        ),
+    )
+    quantizer.process()
+
+    out = out_dir / "model_int4.onnx"
+    quantizer.model.save(str(out))
+    if preprocessed is not None:
+        preprocessed.unlink(missing_ok=True)
+    progress(95, "Done.")
+    return out, {
+        "quant_type": "int4_weight_only",
+        "block_size": block_size,
+        "symmetric": symmetric,
+        "accuracy_level": accuracy_level,
+    }
+
+
+# ---------------------------------------------------------------------------
 # quantize_onnx: ONNX dynamic INT8 (onnxruntime)
 # ---------------------------------------------------------------------------
+def _strip_value_info(src: Path, dst: Path) -> int:
+    """删除 `graph.value_info`（冗余形状标注）后另存，返回删除条数。
+
+    某些导出器（旧版 `torch.onnx.export`、部分第三方流水线）写下的形状标注与
+    onnxruntime 严格形状推断的结果冲突（例如 `Inferred 64 vs existing 5`），
+    会让量化前的形状推断直接失败；标注本身只是缓存，删掉即可安全量化。
+    """
+    import onnx
+
+    proto = onnx.load(str(src))
+    removed = len(proto.graph.value_info)
+    del proto.graph.value_info[:]
+    onnx.save_model(proto, str(dst), save_as_external_data=False)
+    return removed
+
+
+def _prepare_quant_input(
+    src: Path,
+    dst: Path,
+    progress: ProgressCallback,
+) -> tuple[Path, str]:
+    """尽力为 `quantize_dynamic` 准备一个可被严格形状推断接受的图。
+
+    依次尝试：默认预处理 → `skip_symbolic_shape=True` → 不做预处理（原始图）。
+    返回 (可量化图路径, 使用的策略名)。
+    """
+    from onnxruntime.quantization.shape_inference import quant_pre_process
+
+    last_error: Exception | None = None
+    for skip in (False, True):
+        try:
+            quant_pre_process(str(src), str(dst), skip_symbolic_shape=skip)
+            strategy = "skip_symbolic_shape" if skip else "standard"
+            progress(20, f"预处理完成（{strategy}）")
+            return dst, strategy
+        except Exception as exc:  # noqa: BLE001 - 各类形状推断异常都降级处理
+            last_error = exc
+            dst.unlink(missing_ok=True)
+            if not skip:
+                progress(20, f"默认形状推断失败（{type(exc).__name__}），"
+                             "改用 skip_symbolic_shape=True 重试…")
+    progress(25, f"预处理无法完成（{type(last_error).__name__}: "
+                 f"{str(last_error)[:120]}），直接量化原始图…")
+    return src, "none"
+
+
 def quantize_onnx(
     model: Model,
     _params: dict[str, Any],
@@ -492,7 +651,6 @@ def quantize_onnx(
     progress: ProgressCallback,
 ) -> tuple[Path, dict[str, Any]]:
     from onnxruntime.quantization import QuantType, quantize_dynamic
-    from onnxruntime.quantization.shape_inference import quant_pre_process
 
     if model.file_path is None:
         raise ValueError("Model has no local file")
@@ -502,20 +660,42 @@ def quantize_onnx(
 
     progress(10, "Running shape inference...")
     preprocessed = out_dir / "preprocessed.onnx"
-    quant_pre_process(str(src), str(preprocessed))
+    quant_input, strategy = _prepare_quant_input(src, preprocessed, progress)
     out = out_dir / "model_quantized.onnx"
     progress(50, "Quantizing to INT8 (dynamic)...")
-    quantize_dynamic(
-        str(preprocessed),
-        str(out),
-        weight_type=QuantType.QInt8,
-        per_channel=True,
-        # Note: `optimize_model` was removed in onnxruntime >= 1.22; model
-        # optimization now happens automatically before quantization.
-    )
-    preprocessed.unlink(missing_ok=True)
+    shape_repair = None
+    try:
+        quantize_dynamic(
+            str(quant_input),
+            str(out),
+            weight_type=QuantType.QInt8,
+            per_channel=True,
+            # Note: `optimize_model` was removed in onnxruntime >= 1.22; model
+            # optimization now happens automatically before quantization.
+        )
+    except Exception as exc:  # noqa: BLE001 - 多为图内形状标注自相矛盾
+        repaired = out_dir / "preprocessed_noshape.onnx"
+        try:
+            removed = _strip_value_info(quant_input, repaired)
+        except Exception:  # pragma: no cover - 连读图都失败则原样抛出
+            raise
+        progress(60, f"量化失败（{type(exc).__name__}: {str(exc)[:120]}）；"
+                     f"剔除 {removed} 条形状标注后重试…")
+        quantize_dynamic(
+            str(repaired),
+            str(out),
+            weight_type=QuantType.QInt8,
+            per_channel=True,
+        )
+        repaired.unlink(missing_ok=True)
+        shape_repair = f"stripped_{removed}_value_info"
+    if quant_input != src:
+        preprocessed.unlink(missing_ok=True)
     progress(95, "Done.")
-    return out, {"quant_type": "dynamic_int8"}
+    metrics: dict[str, Any] = {"quant_type": "dynamic_int8", "preprocess": strategy}
+    if shape_repair:
+        metrics["shape_repair"] = shape_repair
+    return out, metrics
 
 
 # ---------------------------------------------------------------------------
@@ -3131,13 +3311,37 @@ def _make_runner(path: Path) -> Any:
         return lambda arr: compiled({input_name: arr})[output_key]
 
     if path.suffix.lower() == ".onnx":
+        import numpy as np
         import onnxruntime as ort
 
         session = ort.InferenceSession(
             str(path), providers=["CPUExecutionProvider"]
         )
         input_name = session.get_inputs()[0].name
-        return lambda arr: session.run(None, {input_name: arr})[0]
+        shape = session.get_inputs()[0].shape
+        fixed_batch = shape[0] if shape and isinstance(shape[0], int) else None
+
+        def _run(arr: Any) -> Any:
+            n = arr.shape[0]
+            # 静态 batch 的图：拆成它以固定批量喂入
+            if fixed_batch and n > fixed_batch:
+                pieces = [
+                    session.run(None, {input_name: arr[i : i + fixed_batch]})[0]
+                    for i in range(0, n, fixed_batch)
+                ]
+                return np.concatenate(pieces, axis=0)
+            try:
+                return session.run(None, {input_name: arr})[0]
+            except Exception:
+                # 声明动态 batch 但内部 Reshape 写死单条的图：自动逐条推理
+                if n <= 1:
+                    raise
+                return np.concatenate(
+                    [session.run(None, {input_name: arr[i : i + 1]})[0] for i in range(n)],
+                    axis=0,
+                )
+
+        return _run
 
     if path.suffix.lower() in {".pt", ".pth"}:
         import torch

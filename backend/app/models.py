@@ -39,6 +39,7 @@ class ModelStatus(enum.StrEnum):
 class CompressionMethod(enum.StrEnum):
     export_onnx = "export_onnx"  # PyTorch -> ONNX (+ onnxsim simplify)
     quantize_onnx = "quantize_onnx"  # ONNX dynamic INT8 quantization
+    quantize_onnx_int4 = "quantize_onnx_int4"  # ONNX INT4 weight-only (MatMulNBits)
     quantize_onnx_static = "quantize_onnx_static"  # ONNX static INT8 (with calibration data)
     openvino_int8 = "openvino_int8"  # OpenVINO IR + NNCF INT8 post-training quantization
     prune = "prune"  # L1/L2/BN-Slim structured filter pruning (PyTorch CNN)

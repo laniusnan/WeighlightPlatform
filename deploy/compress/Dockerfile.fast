@@ -1,0 +1,32 @@
+# syntax=docker/dockerfile:1
+# ---------------------------------------------------------------------------
+# 模型压缩作业镜像（快速构建版）：直接复用已构建好的平台镜像作为基础层，
+# 只把单文件入口 compress_job.py 与本目录文件加进去 —— 秒级构建、零依赖重装，
+# 适合「同事手上已有平台镜像（backend:cpu-ship / backend:latest）」的场景。
+#
+#   docker build -f deploy/compress/Dockerfile.fast -t compress-job:cpu .
+#   # 指定其它基础镜像：
+#   docker build -f deploy/compress/Dockerfile.fast -t compress-job:cpu \
+#     --build-arg BASE_IMAGE=backend:latest .
+#
+# 注意事项：基础镜像必须包含平台代码（/app/backend/app/jobs/compression.py）。
+# ---------------------------------------------------------------------------
+ARG BASE_IMAGE=backend:cpu-ship
+FROM ${BASE_IMAGE}
+
+# 平台代码：用构建上下文（当前仓库）覆盖基础镜像里的副本，保证 CLI 与引擎版本一致
+# （基础镜像可能是几天前构建的；这一步等价于手工 docker cp backend/app，但可复现）
+COPY backend/app /app/backend/app
+
+# 单文件入口 + 示例 + 可选离线 GGUF 工具
+COPY compress_job.py /app/compress_job.py
+COPY deploy/compress/examples /app/examples
+COPY deploy/compress/llama-cpp /opt/llama.cpp
+
+ENV PYTHONPATH=/app/backend \
+    LLAMA_CPP_PATH=/opt/llama.cpp \
+    MODEL_STORAGE_PATH=/tmp/compress-storage
+
+WORKDIR /app
+ENTRYPOINT ["python", "/app/compress_job.py"]
+CMD ["--help"]

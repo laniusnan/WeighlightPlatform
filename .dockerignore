@@ -7,6 +7,8 @@
 .venv311gpu
 # Runtime storage / model artifacts are always mounted volumes, never baked in
 backend/models-storage
+# Deliverable bundles / image tars (scripts/compress-bundle.sh)
+dist
 # llama.cpp checkout is mounted read-only at runtime (LLAMA_CPP_PATH)
 llama.cpp
 backend/htmlcov

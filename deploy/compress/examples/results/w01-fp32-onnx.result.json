@@ -1,0 +1,42 @@
+{
+  "status": "succeeded",
+  "job_id": "weld-01",
+  "tenant_id": "welding",
+  "trace_id": "demo-1",
+  "method": "export",
+  "algo": "onnx",
+  "base_model_path": "/out/w01-fp32-onnx/_stage/welding_transformer.pt",
+  "dataset_path": null,
+  "output_dir": "/out/w01-fp32-onnx",
+  "artifact": "/out/w01-fp32-onnx/artifact/model.onnx",
+  "artifact_resolved": "/out/w01-fp32-onnx/artifact/model.onnx",
+  "artifact_bytes": 507726,
+  "duration_s": 4.406,
+  "metrics": {
+    "model_kind": "tabular",
+    "params": 118053
+  },
+  "steps": [
+    {
+      "index": 1,
+      "method": "export",
+      "algo": "onnx",
+      "platform_method": "export_onnx",
+      "params": {
+        "opset": 17,
+        "model_kind": "tabular",
+        "input_shape": [
+          1,
+          7
+        ]
+      },
+      "artifact": "/out/w01-fp32-onnx/artifact/model.onnx",
+      "resolved": "/out/w01-fp32-onnx/artifact/model.onnx",
+      "artifact_bytes": 507726,
+      "metrics": {
+        "model_kind": "tabular",
+        "params": 118053
+      }
+    }
+  ]
+}

@@ -1,0 +1,1111 @@
+{
+  "version": 1,
+  "generatedAt": "2026-09-23",
+  "report": "docs/compression-eval-report.md",
+  "cards": [
+    {
+      "id": "export_onnx",
+      "label": {
+        "zh": "导出 ONNX",
+        "en": "Export ONNX"
+      },
+      "summary": {
+        "zh": "PyTorch 检查点转 ONNX（torch.onnx.export + onnxsim 简化），后续量化/推理的前置步骤。",
+        "en": "Convert a PyTorch checkpoint to ONNX (torch.onnx.export + onnxsim), the prerequisite for quantization and ONNX runtimes."
+      },
+      "group": "格式转换",
+      "calibration": {
+        "needed": false,
+        "note": {
+          "zh": "不需要数据；只需输入形状/opset。",
+          "en": "No data needed; only input shape / opset."
+        }
+      },
+      "inputs": [
+        {
+          "name": "--base-model-path",
+          "required": true,
+          "format": {
+            "zh": ".pt/.pth 检查点",
+            "en": ".pt/.pth checkpoint"
+          },
+          "note": {
+            "zh": "state_dict / torch.save(model) / build_model(config) 三种格式都支持",
+            "en": "state_dict, torch.save(model) and build_model(config) are all supported"
+          }
+        },
+        {
+          "name": "--arch-file",
+          "required": false,
+          "format": {
+            "zh": "模型定义 .py（含 build_model）",
+            "en": "model definition .py (with build_model)"
+          },
+          "note": {
+            "zh": "检查点只有权重时必须提供；同目录有 arch.py 时自动使用",
+            "en": "Required when the checkpoint only holds weights; an arch.py next to the model is picked up automatically"
+          }
+        },
+        {
+          "name": "--input-shape",
+          "required": true,
+          "format": {
+            "zh": "如 1x3x32x32（表格模型 1x7）",
+            "en": "e.g. 1x3x32x32 (tabular: 1x7)"
+          }
+        }
+      ],
+      "suits": {
+        "models": [
+          "cnn",
+          "transformer",
+          "tabular",
+          "yolo"
+        ],
+        "tasks": [
+          "image-classification",
+          "object-detection",
+          "tabular-classification"
+        ]
+      },
+      "effect": {
+        "compression": {
+          "zh": "体积≈持平（FP32 精度不变，实测 +3%）",
+          "en": "Same size (FP32 kept, measured +3%)"
+        },
+        "accuracy": {
+          "zh": "精度不变（数值等价）",
+          "en": "Unchanged (numerically equivalent)"
+        },
+        "latency": {
+          "zh": "ONNX Runtime 通常略快于 PyTorch eager",
+          "en": "ONNX Runtime is usually slightly faster than PyTorch eager"
+        }
+      },
+      "limits": [
+        {
+          "zh": "必须给输入形状；表格/非图像模型要显式指定（如 1x7）。",
+          "en": "Input shape is mandatory; non-image models must pass it explicitly (e.g. 1x7)."
+        },
+        {
+          "zh": "默认静态 batch（1）；需要动态 batch 要加 --dynamic-axes，且动态 batch 与 INT8 动态量化组合受限。",
+          "en": "Static batch=1 by default; use --dynamic-axes for dynamic batch, which then conflicts with dynamic INT8 quantization."
+        },
+        {
+          "zh": "YOLO 走 ultralytics 分支，需要 ultralytics 依赖与 imgsz。",
+          "en": "YOLO uses the ultralytics branch (needs the dependency and --imgsz)."
+        }
+      ],
+      "evidence": {
+        "dataset": "CIFAR10-test (10,000 samples)",
+        "summary": {
+          "zh": "压缩率 3.0%；体积 392,548 → 380,919 B；Top-1 68.79% → 68.79%（+0.00pp）；p50 0.098 ms / p99 0.339 ms；作业耗时 3.133 s",
+          "en": "3.0% smaller; 392,548 → 380,919 B; Top-1 68.79% → 68.79% (+0.00pp); p50 0.098 ms / p99 0.339 ms; job took 3.133 s"
+        },
+        "baseline_accuracy": 0.6879,
+        "result_accuracy": 0.6879,
+        "bytes_before": 392548,
+        "bytes_after": 380919,
+        "duration_s": 3.133,
+        "report_anchor": "docs/compression-eval-report.md#01-export"
+      }
+    },
+    {
+      "id": "export_gguf",
+      "label": {
+        "zh": "GGUF 导出",
+        "en": "Export GGUF"
+      },
+      "summary": {
+        "zh": "把 HuggingFace 因果语言模型转成 llama.cpp 的 GGUF（f16/q8_0/q4_K_M…），供 ollama/llama.cpp 生态直接加载。",
+        "en": "Convert a HuggingFace causal LM to llama.cpp GGUF (f16/q8_0/q4_K_M…) for ollama / llama.cpp."
+      },
+      "group": "格式转换",
+      "calibration": {
+        "needed": false,
+        "note": {
+          "zh": "不需要数据。",
+          "en": "No data needed."
+        }
+      },
+      "inputs": [
+        {
+          "name": "--base-model-path",
+          "required": true,
+          "format": {
+            "zh": "HF 模型目录（config.json 所在目录）",
+            "en": "HF model directory (with config.json)"
+          }
+        },
+        {
+          "name": "--outtype",
+          "required": false,
+          "format": {
+            "zh": "f16 | q8_0 | q4_0 | q4_K_M | q6_K …",
+            "en": "f16 | q8_0 | q4_0 | q4_K_M | q6_K …"
+          },
+          "note": {
+            "zh": "默认 f16",
+            "en": "f16 by default"
+          }
+        },
+        {
+          "name": "llama.cpp 工具",
+          "required": true,
+          "format": {
+            "zh": "离线目录或可访问网络",
+            "en": "offline directory OR network access"
+          },
+          "note": {
+            "zh": "用 --llama-cpp-path 指到含 convert_hf_to_gguf.py 的目录；否则引擎会联网拉取",
+            "en": "Point --llama-cpp-path at a directory containing convert_hf_to_gguf.py; otherwise the engine fetches it online"
+          }
+        }
+      ],
+      "suits": {
+        "models": [
+          "llm"
+        ],
+        "tasks": [
+          "text-generation"
+        ]
+      },
+      "effect": {
+        "compression": {
+          "zh": "按 outtype：f16≈2×缩小，q4_K_M 约 4~5×缩小",
+          "en": "Depends on outtype: f16 ≈ 2×, q4_K_M ≈ 4–5× smaller"
+        },
+        "accuracy": {
+          "zh": "q4_K_M 通常 <1% 困惑度上升；f16 无损失",
+          "en": "q4_K_M usually <1% PPL increase; f16 lossless"
+        },
+        "latency": {
+          "zh": "llama.cpp CPU 推理，量化越低位越快",
+          "en": "llama.cpp CPU inference; lower bits run faster"
+        }
+      },
+      "limits": [
+        {
+          "zh": "需要 llama.cpp 的 convert_hf_to_gguf.py；离线环境要把工具放进 deploy/compress/llama-cpp/（或 --llama-cpp-path 指向本机 checkout）。",
+          "en": "Requires llama.cpp's convert_hf_to_gguf.py; offline hosts must place it in deploy/compress/llama-cpp/ (or point --llama-cpp-path at a local checkout)."
+        },
+        {
+          "zh": "自定义架构（非 llama/qwen/gpt 系）可能不被工具支持。",
+          "en": "Custom architectures outside the llama/qwen/gpt families may be unsupported."
+        },
+        {
+          "zh": "实测：Qwen2.5-0.5B → q4_K_M 511 MB（−48.8%）、31 s、离线可复现；困惑度损失未单独测（PPL 见 INT4 行）。",
+          "en": "Measured: Qwen2.5-0.5B → q4_K_M 511 MB (−48.8%) in 31 s, fully offline; perplexity loss not measured separately (see the INT4 row for PPL)."
+        }
+      ],
+      "evidence": {
+        "dataset": "Qwen2.5-0.5B（服务器本地 HF 目录）",
+        "summary": {
+          "zh": "q4_K_M 511 MB（HF 基线 1000 MB，−48.8%）；使用本机离线 llama.cpp 工具完成（无需联网）；outtype=q4_K_M；耗时 31 s",
+          "en": "q4_K_M 511 MB (HF baseline 1000 MB, −48.8%); converted with the on-host llama.cpp toolchain (no network); outtype=q4_K_M; took 31 s"
+        },
+        "baseline_accuracy": null,
+        "result_accuracy": null,
+        "bytes_before": 999602900,
+        "bytes_after": 511434656,
+        "duration_s": 31.368,
+        "report_anchor": "docs/compression-eval-report.md#410-export_gguf22-qwen-gguf"
+      }
+    },
+    {
+      "id": "quantize_onnx",
+      "label": {
+        "zh": "ONNX 动态 INT8",
+        "en": "ONNX dynamic INT8"
+      },
+      "summary": {
+        "zh": "onnxruntime 权重动态量化（激活运行时定标）：免校准数据、一条命令把 FP32 ONNX 压到约 1/4。",
+        "en": "onnxruntime weight-only dynamic quantization: no calibration data, roughly 4× smaller than the FP32 ONNX."
+      },
+      "group": "量化",
+      "calibration": {
+        "needed": false,
+        "note": {
+          "zh": "不需要校准数据。",
+          "en": "No calibration data."
+        }
+      },
+      "inputs": [
+        {
+          "name": "--base-model-path",
+          "required": true,
+          "format": {
+            "zh": "ONNX（.onnx）",
+            "en": "ONNX (.onnx)"
+          }
+        },
+        {
+          "name": "--external-data-path",
+          "required": false,
+          "format": {
+            "zh": "外部权重 .onnx.data（文件或目录）",
+            "en": "external weights .onnx.data (file or directory)"
+          },
+          "note": {
+            "zh": "仅当 ONNX 带 external data 时必填；引擎会把权重内联成单文件",
+            "en": "Only required for ONNX with external data; the engine inlines it into a single file"
+          }
+        }
+      ],
+      "suits": {
+        "models": [
+          "cnn",
+          "transformer",
+          "tabular",
+          "llm"
+        ],
+        "tasks": [
+          "image-classification",
+          "tabular-classification",
+          "text-generation"
+        ]
+      },
+      "effect": {
+        "compression": {
+          "zh": "约 3.5~4.5× 缩小（实测 −73.7%）",
+          "en": "≈3.5–4.5× smaller (measured −73.7%)"
+        },
+        "accuracy": {
+          "zh": "实测 Top-1 68.79% → 68.27%（−0.52pp）",
+          "en": "Measured Top-1 68.79% → 68.27% (−0.52pp)"
+        },
+        "latency": {
+          "zh": "p50 0.44 ms / p99 0.79 ms（batch=1）",
+          "en": "p50 0.44 ms / p99 0.79 ms (batch=1)"
+        }
+      },
+      "limits": [
+        {
+          "zh": "只量化权重，激活仍 FP32：提速有限（本 demo 反而比静态 INT8 慢 5×）。",
+          "en": "Weights only, activations stay FP32: limited speed-up (here 5× slower than static INT8)."
+        },
+        {
+          "zh": "动态 batch 注意力图与动态量化组合会触发 onnxruntime 形状限制。",
+          "en": "Dynamic-batch attention graphs conflict with ORT quantizer shape checks."
+        },
+        {
+          "zh": "旧导出器写的形状标注自相矛盾时，引擎自动剔除 value_info 重试（看 metrics.shape_repair）。",
+          "en": "When legacy exporters write contradictory shape annotations the engine strips value_info and retries (see metrics.shape_repair)."
+        }
+      ],
+      "evidence": {
+        "dataset": "CIFAR10-test (10,000 samples)",
+        "summary": {
+          "zh": "压缩率 73.7%；体积 392,548 → 103,310 B；Top-1 68.79% → 68.27%（-0.52pp）；p50 0.44 ms / p99 0.787 ms；作业耗时 20.815 s",
+          "en": "73.7% smaller; 392,548 → 103,310 B; Top-1 68.79% → 68.27% (-0.52pp); p50 0.44 ms / p99 0.787 ms; job took 20.815 s"
+        },
+        "baseline_accuracy": 0.6879,
+        "result_accuracy": 0.6827,
+        "bytes_before": 392548,
+        "bytes_after": 103310,
+        "duration_s": 20.815,
+        "report_anchor": "docs/compression-eval-report.md#02-dynamic-int8"
+      }
+    },
+    {
+      "id": "quantize_onnx_static",
+      "label": {
+        "zh": "ONNX 静态 INT8",
+        "en": "ONNX static INT8"
+      },
+      "summary": {
+        "zh": "QDQ 静态量化（权重+激活都定点）：用一批代表性图片校准激活范围，CPU 上通常最快。",
+        "en": "QDQ static quantization (weights and activations): calibrate activation ranges on real images — usually the fastest CPU option."
+      },
+      "group": "量化",
+      "calibration": {
+        "needed": true,
+        "note": {
+          "zh": "需要按类图片目录（本次用 CIFAR10-train 的 512 张）。",
+          "en": "Needs a per-class image directory (512 images from CIFAR10-train here)."
+        }
+      },
+      "inputs": [
+        {
+          "name": "--base-model-path",
+          "required": true,
+          "format": {
+            "zh": "ONNX（.onnx）",
+            "en": "ONNX (.onnx)"
+          }
+        },
+        {
+          "name": "--dataset-path",
+          "required": true,
+          "format": {
+            "zh": "按类图片目录",
+            "en": "per-class image directory"
+          }
+        },
+        {
+          "name": "--max-samples",
+          "required": false,
+          "format": {
+            "zh": "校准样本数（默认 16；实测 512 更稳）",
+            "en": "calibration samples (default 16; 512 measured more stable)"
+          }
+        }
+      ],
+      "suits": {
+        "models": [
+          "cnn",
+          "yolo",
+          "transformer"
+        ],
+        "tasks": [
+          "image-classification",
+          "object-detection"
+        ]
+      },
+      "effect": {
+        "compression": {
+          "zh": "实测 −72.4%（380,919 → 108,431 B）",
+          "en": "Measured −72.4% (380,919 → 108,431 B)"
+        },
+        "accuracy": {
+          "zh": "实测 Top-1 68.79% → 68.68%（−0.11pp）",
+          "en": "Measured 68.79% → 68.68% (−0.11pp)"
+        },
+        "latency": {
+          "zh": "p50 0.079 ms / p99 0.247 ms、2,553 样本/s — 本批最快",
+          "en": "p50 0.079 ms / p99 0.247 ms, 2,553 samples/s — fastest of the batch"
+        }
+      },
+      "limits": [
+        {
+          "zh": "必须有代表性校准集，分布不匹配会明显掉精度。",
+          "en": "A representative calibration set is mandatory; mismatched data costs accuracy."
+        },
+        {
+          "zh": "校准数据要用按类目录结构（class_x/*.jpg|png|bmp）。",
+          "en": "Calibration data must use per-class folders (class_x/*.jpg|png|bmp)."
+        },
+        {
+          "zh": "只量化常见算子，自定义算子保持 FP32。",
+          "en": "Only common ops are quantized; custom ops stay FP32."
+        }
+      ],
+      "evidence": {
+        "dataset": "CIFAR10-test (10,000 samples)",
+        "summary": {
+          "zh": "压缩率 72.4%；体积 392,548 → 108,431 B；Top-1 68.79% → 68.68%（-0.11pp）；p50 0.079 ms / p99 0.247 ms；作业耗时 8.008 s",
+          "en": "72.4% smaller; 392,548 → 108,431 B; Top-1 68.79% → 68.68% (-0.11pp); p50 0.079 ms / p99 0.247 ms; job took 8.008 s"
+        },
+        "baseline_accuracy": 0.6879,
+        "result_accuracy": 0.6868,
+        "bytes_before": 392548,
+        "bytes_after": 108431,
+        "duration_s": 8.008,
+        "report_anchor": "docs/compression-eval-report.md#03-static-int8"
+      }
+    },
+    {
+      "id": "openvino_int8",
+      "label": {
+        "zh": "OpenVINO INT8",
+        "en": "OpenVINO INT8"
+      },
+      "summary": {
+        "zh": "导出 OpenVINO IR 并用 NNCF 做训练后 INT8 量化（也可 FP16），产物是 model.xml + model.bin 目录。",
+        "en": "Export OpenVINO IR and quantize with NNCF (or FP16); the artifact is a model.xml + model.bin directory."
+      },
+      "group": "量化",
+      "calibration": {
+        "needed": true,
+        "note": {
+          "zh": "INT8 需要校准图片；FP16/FP32 不需要（--precision）。",
+          "en": "INT8 needs calibration images; FP16/FP32 do not (--precision)."
+        }
+      },
+      "inputs": [
+        {
+          "name": "--base-model-path",
+          "required": true,
+          "format": {
+            "zh": "ONNX 或 PyTorch 检查点",
+            "en": "ONNX or PyTorch checkpoint"
+          }
+        },
+        {
+          "name": "--dataset-path",
+          "required": true,
+          "format": {
+            "zh": "按类图片目录（INT8 校准）",
+            "en": "per-class image directory (INT8 calibration)"
+          }
+        },
+        {
+          "name": "--precision",
+          "required": false,
+          "format": {
+            "zh": "int8 | fp16 | fp32",
+            "en": "int8 | fp16 | fp32"
+          }
+        }
+      ],
+      "suits": {
+        "models": [
+          "cnn",
+          "yolo",
+          "transformer",
+          "llm"
+        ],
+        "tasks": [
+          "image-classification",
+          "object-detection",
+          "text-generation"
+        ]
+      },
+      "effect": {
+        "compression": {
+          "zh": "实测 −68.1%（IR 目录 125,352 B）",
+          "en": "Measured −68.1% (IR directory 125,352 B)"
+        },
+        "accuracy": {
+          "zh": "实测 Top-1 68.79% → 67.01%（−1.78pp）",
+          "en": "Measured 68.79% → 67.01% (−1.78pp)"
+        },
+        "latency": {
+          "zh": "p50 0.182 ms / p99 0.534 ms",
+          "en": "p50 0.182 ms / p99 0.534 ms"
+        }
+      },
+      "limits": [
+        {
+          "zh": "产物是目录（model.xml/model.bin），部署/下载要整目录带走。",
+          "en": "Artifact is a directory (model.xml/model.bin) — ship the whole folder."
+        },
+        {
+          "zh": "静态 batch 输入：批量推理需按固定批量喂入。",
+          "en": "Static-batch input: batch inference must feed the fixed batch size."
+        },
+        {
+          "zh": "Intel CPU 上收益最大；其它平台退化为通用后端。",
+          "en": "Biggest gains on Intel CPUs; other vendors fall back to a generic backend."
+        }
+      ],
+      "evidence": {
+        "dataset": "CIFAR10-test (10,000 samples)",
+        "summary": {
+          "zh": "压缩率 68.1%；体积 392,548 → 125,352 B；Top-1 68.79% → 67.01%（-1.78pp）；p50 0.182 ms / p99 0.534 ms；作业耗时 10.678 s",
+          "en": "68.1% smaller; 392,548 → 125,352 B; Top-1 68.79% → 67.01% (-1.78pp); p50 0.182 ms / p99 0.534 ms; job took 10.678 s"
+        },
+        "baseline_accuracy": 0.6879,
+        "result_accuracy": 0.6701,
+        "bytes_before": 392548,
+        "bytes_after": 125352,
+        "duration_s": 10.678,
+        "report_anchor": "docs/compression-eval-report.md#04-openvino-int8"
+      }
+    },
+    {
+      "id": "llm_quantize",
+      "label": {
+        "zh": "LLM INT4 / INT8",
+        "en": "LLM INT4 / INT8"
+      },
+      "summary": {
+        "zh": "HuggingFace 大模型 → OpenVINO IR 的权重压缩（optimum-intel / NNCF INT4）：免校准，把 0.5B 级模型压到约 1/4。",
+        "en": "HuggingFace LLM → OpenVINO IR weight compression (optimum-intel / NNCF INT4): no calibration, takes a 0.5B model to about 1/4."
+      },
+      "group": "量化",
+      "calibration": {
+        "needed": false,
+        "note": {
+          "zh": "权重压缩不需要校准数据。",
+          "en": "Weight compression needs no calibration data."
+        }
+      },
+      "inputs": [
+        {
+          "name": "--base-model-path",
+          "required": true,
+          "format": {
+            "zh": "HF 模型目录 / 模型 ID",
+            "en": "HF model directory / model id"
+          }
+        },
+        {
+          "name": "--bits",
+          "required": false,
+          "format": {
+            "zh": "4 | 8（默认 4）",
+            "en": "4 | 8 (default 4)"
+          }
+        },
+        {
+          "name": "--group-size",
+          "required": false,
+          "format": {
+            "zh": "32 | 64 | 128 | 256（默认 128）",
+            "en": "32 | 64 | 128 | 256 (default 128)"
+          }
+        }
+      ],
+      "suits": {
+        "models": [
+          "llm"
+        ],
+        "tasks": [
+          "text-generation"
+        ]
+      },
+      "effect": {
+        "compression": {
+          "zh": "INT4 约 3.5~4×（0.999 GB → 见报告实测值）",
+          "en": "INT4 ≈3.5–4× (0.999 GB → measured value in the report)"
+        },
+        "accuracy": {
+          "zh": "困惑度上升通常 <5%（group 128 / sym）",
+          "en": "Perplexity increase usually <5% (group 128 / sym)"
+        },
+        "latency": {
+          "zh": "CPU 生成明显提速（tokens/s 见报告）",
+          "en": "Clearly faster CPU generation (tokens/s in the report)"
+        }
+      },
+      "limits": [
+        {
+          "zh": "产物是 OpenVINO IR 目录，需用 OV/GenAI 或平台推理接口加载。",
+          "en": "Artifact is an OpenVINO IR directory; load with OV/GenAI or the platform inference API."
+        },
+        {
+          "zh": "超小模型（<0.5B）INT4 掉点更明显，建议 group 128 + sym。",
+          "en": "INT4 hurts tiny models (<0.5B) more; prefer group 128 + sym."
+        },
+        {
+          "zh": "NNCF INT4 走 CPU 通道压缩，长上下文吞吐受内存带宽限制。",
+          "en": "NNCF INT4 uses CPU channel compression; long-context throughput is memory-bandwidth bound."
+        }
+      ],
+      "evidence": {
+        "dataset": "alpaca-eval.txt (32 行派生语料)",
+        "summary": {
+          "zh": "压缩率 66.1%；IR 339 MB（基线 1000 MB）；引擎轻量困惑度 5.295；平台基准 p50 1307 → 704 ms（2.156× 加速）；峰值内存 2381 → 1243 MB；耗时 8713 s",
+          "en": "66.1% smaller; IR 339 MB (baseline 1000 MB); engine light-eval PPL 5.295; platform bench p50 1307 → 704 ms (2.156× speed-up); peak memory 2381 → 1243 MB; took 8713 s"
+        },
+        "baseline_accuracy": null,
+        "result_accuracy": null,
+        "bytes_before": 999602900,
+        "bytes_after": 339069255,
+        "duration_s": 8712.873,
+        "report_anchor": "docs/compression-eval-report.md#48-llm_quantizenncf-int420-qwen-int4"
+      }
+    },
+    {
+      "id": "prune",
+      "label": {
+        "zh": "结构化剪枝",
+        "en": "Structured pruning"
+      },
+      "summary": {
+        "zh": "按滤波器重要性（L1/L2/BN-Slim）或数据驱动准则（AutoSlim/GroupFisher/DMCP）整通道裁剪 CNN，再导出瘦身后的图。",
+        "en": "Remove whole CNN filters by importance (L1/L2/BN-Slim) or data-driven criteria (AutoSlim/GroupFisher/DMCP) and export the slimmed graph."
+      },
+      "group": "剪枝 / 稀疏化",
+      "calibration": {
+        "needed": false,
+        "note": {
+          "zh": "L1/L2/BN-Slim 免数据；AutoSlim/GroupFisher/DMCP 需要按类图片目录。",
+          "en": "L1/L2/BN-Slim need no data; AutoSlim/GroupFisher/DMCP need a per-class image directory."
+        }
+      },
+      "inputs": [
+        {
+          "name": "--base-model-path",
+          "required": true,
+          "format": {
+            "zh": "PyTorch 检查点",
+            "en": "PyTorch checkpoint"
+          }
+        },
+        {
+          "name": "--arch-file",
+          "required": true,
+          "format": {
+            "zh": "模型定义 .py",
+            "en": "model definition .py"
+          },
+          "note": {
+            "zh": "剪枝要重建网络并改通道数",
+            "en": "Pruning rebuilds the network with new channel counts"
+          }
+        },
+        {
+          "name": "--rate",
+          "required": true,
+          "format": {
+            "zh": "0<rate<1（本次 0.1 / 0.3）",
+            "en": "0<rate<1 (0.1 / 0.3 here)"
+          }
+        },
+        {
+          "name": "--dataset-path",
+          "required": false,
+          "format": {
+            "zh": "按类图片目录（仅数据驱动准则）",
+            "en": "per-class image directory (data-driven criteria only)"
+          }
+        }
+      ],
+      "suits": {
+        "models": [
+          "cnn"
+        ],
+        "tasks": [
+          "image-classification",
+          "object-detection"
+        ]
+      },
+      "effect": {
+        "compression": {
+          "zh": "rate 0.3：94,986 → 45,915 参数、380,919 → 185,178 B（−52.8%）",
+          "en": "rate 0.3: 94,986 → 45,915 params, 380,919 → 185,178 B (−52.8%)"
+        },
+        "accuracy": {
+          "zh": "**未微调会崩**：实测 68.79% → 20.1%（rate 0.3）/ 17.4%（rate 0.1）",
+          "en": "**Collapses without fine-tuning**: measured 68.79% → 20.1% (rate 0.3) / 17.4% (rate 0.1)"
+        },
+        "latency": {
+          "zh": "p50 0.126 ms（CPU 小网络收益有限）",
+          "en": "p50 0.126 ms (small nets gain little on CPU)"
+        }
+      },
+      "limits": [
+        {
+          "zh": "只支持含 Conv2d 的 CNN；纯 Transformer/MLP 报 No Conv2d layers found。",
+          "en": "CNN (Conv2d) only; pure Transformer/MLP fails with “No Conv2d layers found”."
+        },
+        {
+          "zh": "必须提供 arch.py（能重建模型）。",
+          "en": "arch.py is mandatory (model must be rebuildable)."
+        },
+        {
+          "zh": "剪完要自己接 QAT/微调，否则精度不可用。",
+          "en": "Follow with QAT/fine-tuning, otherwise accuracy is unusable."
+        },
+        {
+          "zh": "分类头维度会自动对齐，这会改变 head 权重映射，是掉点主因之一。",
+          "en": "The classifier head is auto-adjusted, rewiring head weights — one of the main accuracy hits."
+        }
+      ],
+      "evidence": {
+        "dataset": "CIFAR10-test (10,000 samples)",
+        "summary": {
+          "zh": "压缩率 52.8%；体积 392,548 → 185,178 B；Top-1 68.79% → 20.10%（-48.69pp）；p50 0.126 ms / p99 0.509 ms；作业耗时 8.469 s",
+          "en": "52.8% smaller; 392,548 → 185,178 B; Top-1 68.79% → 20.10% (-48.69pp); p50 0.126 ms / p99 0.509 ms; job took 8.469 s"
+        },
+        "baseline_accuracy": 0.6879,
+        "result_accuracy": 0.201,
+        "bytes_before": 392548,
+        "bytes_after": 185178,
+        "duration_s": 8.469,
+        "report_anchor": "docs/compression-eval-report.md#05-prune-l2"
+      }
+    },
+    {
+      "id": "sparsify",
+      "label": {
+        "zh": "权重稀疏化",
+        "en": "Weight sparsification"
+      },
+      "summary": {
+        "zh": "按幅值把最小的权重置零（非结构化稀疏）：结构不变，适合存储压缩与后续稀疏推理。",
+        "en": "Zero the smallest weights by magnitude (unstructured sparsity): the graph is unchanged; useful for storage and sparsity-aware runtimes."
+      },
+      "group": "剪枝 / 稀疏化",
+      "calibration": {
+        "needed": false,
+        "note": {
+          "zh": "不需要数据。",
+          "en": "No data needed."
+        }
+      },
+      "inputs": [
+        {
+          "name": "--base-model-path",
+          "required": true,
+          "format": {
+            "zh": "PyTorch 检查点",
+            "en": "PyTorch checkpoint"
+          }
+        },
+        {
+          "name": "--rate",
+          "required": true,
+          "format": {
+            "zh": "置零比例 0<rate<1",
+            "en": "fraction to zero, 0<rate<1"
+          }
+        }
+      ],
+      "suits": {
+        "models": [
+          "cnn",
+          "transformer",
+          "tabular"
+        ],
+        "tasks": [
+          "image-classification",
+          "tabular-classification"
+        ]
+      },
+      "effect": {
+        "compression": {
+          "zh": "稠密存储不变小（要稀疏格式才体现）",
+          "en": "Dense storage does not shrink (needs a sparse format)"
+        },
+        "accuracy": {
+          "zh": "小幅扰动，rate 0.3 一般 <1pp（见报告实测）",
+          "en": "Small perturbation, usually <1pp at rate 0.3 (see report)"
+        },
+        "latency": {
+          "zh": "稠密 CPU 推理不变快",
+          "en": "No speed-up for dense CPU inference"
+        }
+      },
+      "limits": [
+        {
+          "zh": "非结构化、不改通道数，产出仍是稠密张量。",
+          "en": "Unstructured: channel counts and dense tensors unchanged."
+        },
+        {
+          "zh": "要加速需配合稀疏内核或再做一次结构化剪枝。",
+          "en": "Speed-up needs sparse kernels or a follow-up structured prune."
+        },
+        {
+          "zh": "本实验只验证流程与精度扰动。",
+          "en": "This experiment validates the pipeline and accuracy perturbation only."
+        }
+      ],
+      "evidence": {
+        "dataset": "CIFAR10-test (10,000 samples)",
+        "summary": {
+          "zh": "压缩率 3.1%；体积 392,548 → 380,297 B；Top-1 68.79% → 48.97%（-19.82pp）；p50 0.133 ms / p99 0.885 ms；作业耗时 10.233 s",
+          "en": "3.1% smaller; 392,548 → 380,297 B; Top-1 68.79% → 48.97% (-19.82pp); p50 0.133 ms / p99 0.885 ms; job took 10.233 s"
+        },
+        "baseline_accuracy": 0.6879,
+        "result_accuracy": 0.4897,
+        "bytes_before": 392548,
+        "bytes_after": 380297,
+        "duration_s": 10.233,
+        "report_anchor": "docs/compression-eval-report.md#11-sparsify"
+      }
+    },
+    {
+      "id": "distill",
+      "label": {
+        "zh": "知识蒸馏",
+        "en": "Knowledge distillation"
+      },
+      "summary": {
+        "zh": "教师模型输出指导学生模型训练（logits KD / FitNets features），把大模型能力迁移到更小的网络。",
+        "en": "Train a smaller student from the teacher's outputs (logits KD / FitNets features)."
+      },
+      "group": "训练后校准",
+      "calibration": {
+        "needed": true,
+        "note": {
+          "zh": "需要按类图片目录（本次 CIFAR10-train 50,000 张）。",
+          "en": "Needs a per-class image directory (50,000 images from CIFAR10-train here)."
+        }
+      },
+      "inputs": [
+        {
+          "name": "--base-model-path",
+          "required": true,
+          "format": {
+            "zh": "教师模型检查点",
+            "en": "teacher checkpoint"
+          }
+        },
+        {
+          "name": "--arch-file",
+          "required": true,
+          "format": {
+            "zh": "模型定义 .py",
+            "en": "model definition .py"
+          }
+        },
+        {
+          "name": "--dataset-path",
+          "required": true,
+          "format": {
+            "zh": "按类图片目录",
+            "en": "per-class image directory"
+          }
+        },
+        {
+          "name": "--epochs / --temperature / --alpha",
+          "required": false,
+          "format": {
+            "zh": "轮数 / 温度 / KD 权重",
+            "en": "epochs / temperature / KD weight"
+          }
+        }
+      ],
+      "suits": {
+        "models": [
+          "cnn"
+        ],
+        "tasks": [
+          "image-classification"
+        ]
+      },
+      "effect": {
+        "compression": {
+          "zh": "取决于学生宽度（width_mult<1 才压缩；本次 width_mult 未生效，体积≈基线）",
+          "en": "Depends on student width (only width_mult<1 compresses; here it had no effect, size ≈ baseline)"
+        },
+        "accuracy": {
+          "zh": "3 epoch：随机学生 8.7% → 49.4%；10 epoch 见报告",
+          "en": "3 epochs: random student 8.7% → 49.4%; 10-epoch run in the report"
+        },
+        "latency": {
+          "zh": "学生与教师同构时与基线同量级",
+          "en": "Same order as baseline when student matches teacher architecture"
+        }
+      },
+      "limits": [
+        {
+          "zh": "需要教师+学生可重建（arch.py）。",
+          "en": "Teacher and student must be rebuildable (arch.py)."
+        },
+        {
+          "zh": "训练成本高：3 epoch 已 258 s（CPU）。",
+          "en": "Training cost is high: 3 epochs took 258 s on CPU."
+        },
+        {
+          "zh": "width_mult 对 VGG-ish 顺序网络无效（实测学生参数量=教师），真要压缩请用剪枝/量化。",
+          "en": "width_mult has no effect on this VGG-ish sequential net (student params == teacher); use pruning/quantization for real compression."
+        }
+      ],
+      "evidence": {
+        "dataset": "CIFAR10-test (10,000 samples)",
+        "summary": {
+          "zh": "压缩率 3.0%；体积 392,548 → 380,919 B；Top-1 68.79% → 61.27%（-7.52pp）；p50 0.142 ms / p99 1.771 ms；作业耗时 680.716 s",
+          "en": "3.0% smaller; 392,548 → 380,919 B; Top-1 68.79% → 61.27% (-7.52pp); p50 0.142 ms / p99 1.771 ms; job took 680.716 s"
+        },
+        "baseline_accuracy": 0.6879,
+        "result_accuracy": 0.6127,
+        "bytes_before": 392548,
+        "bytes_after": 380919,
+        "duration_s": 680.716,
+        "report_anchor": "docs/compression-eval-report.md#13-distill-10ep"
+      }
+    },
+    {
+      "id": "qat",
+      "label": {
+        "zh": "量化感知训练 QAT",
+        "en": "Quantization-aware training (QAT)"
+      },
+      "summary": {
+        "zh": "在训练中模拟量化误差（FX QAT / LSQ），导出量化 ONNX：比纯训练后量化更保精度，代价是要训练。",
+        "en": "Simulate quantization during training (FX QAT / LSQ) and export a quantized ONNX: better accuracy than post-training quantization at the cost of training."
+      },
+      "group": "训练后校准",
+      "calibration": {
+        "needed": true,
+        "note": {
+          "zh": "需要按类图片目录（训练/校准共用）。",
+          "en": "Needs a per-class image directory (used for both training and calibration)."
+        }
+      },
+      "inputs": [
+        {
+          "name": "--base-model-path",
+          "required": true,
+          "format": {
+            "zh": "PyTorch 检查点",
+            "en": "PyTorch checkpoint"
+          }
+        },
+        {
+          "name": "--arch-file",
+          "required": true,
+          "format": {
+            "zh": "模型定义 .py",
+            "en": "model definition .py"
+          }
+        },
+        {
+          "name": "--dataset-path",
+          "required": true,
+          "format": {
+            "zh": "按类图片目录",
+            "en": "per-class image directory"
+          }
+        },
+        {
+          "name": "--epochs",
+          "required": true,
+          "format": {
+            "zh": "QAT 轮数（CPU 上建议 1~3）",
+            "en": "QAT epochs (1–3 recommended on CPU)"
+          }
+        }
+      ],
+      "suits": {
+        "models": [
+          "cnn"
+        ],
+        "tasks": [
+          "image-classification"
+        ]
+      },
+      "effect": {
+        "compression": {
+          "zh": "与静态 INT8 同级（实测 −72.5%，392,548 → 108,077 B）",
+          "en": "Comparable to static INT8 (measured −72.5%, 392,548 → 108,077 B)"
+        },
+        "accuracy": {
+          "zh": "实测 1 epoch/4k 图仅为 62.8%（−6.0pp）——**QAT 需要更多轮次与全量数据才能体现优势**，别指望 1 轮就超过静态 PTQ（后者 −0.11pp）",
+          "en": "Measured at 1 epoch on 4k images: only 62.8% (−6.0pp) — QAT needs more epochs and full data to pay off; one epoch does not beat static PTQ (−0.11pp)"
+        },
+        "latency": {
+          "zh": "与静态 INT8 同级（实测 p50 0.096 ms / p99 0.306 ms）",
+          "en": "Same as static INT8 (measured p50 0.096 ms / p99 0.306 ms)"
+        }
+      },
+      "limits": [
+        {
+          "zh": "CLI 已支持：`--method=qat --algo=fx_int8|lsq`（需要 --dataset-path 按类图片目录）。",
+          "en": "CLI support: `--method=qat --algo=fx_int8|lsq` (requires --dataset-path with per-class images)."
+        },
+        {
+          "zh": "必须在有 passwd 条目的用户下运行：容器内 uid 无 passwd 时 FX QAT 会退回 fine-tune+PTQ（实测报 getpwuid uid not found）。",
+          "en": "Must run as a user that exists in the image: without a passwd entry FX QAT silently falls back to fine-tune + PTQ (observed “getpwuid uid not found”)."
+        },
+        {
+          "zh": "只在 Conv/Linear 等 FX 可追踪模块上生效；动态控制流图会失败。",
+          "en": "Only works on FX-traceable Conv/Linear modules; dynamic control flow fails."
+        },
+        {
+          "zh": "内存占用高：全量 50k 图像直接跑会被 OOM 杀掉（实测 exit 137），建议先小样本子集。",
+          "en": "Memory hungry: the full 50k-image run was OOM-killed (exit 137); start from a subset."
+        }
+      ],
+      "evidence": {
+        "dataset": "CIFAR10-test (10,000 samples)",
+        "summary": {
+          "zh": "压缩率 72.5%；体积 392,548 → 108,077 B；Top-1 68.79% → 62.80%（-5.99pp）；p50 0.096 ms / p99 0.306 ms；作业耗时 19.127 s",
+          "en": "72.5% smaller; 392,548 → 108,077 B; Top-1 68.79% → 62.80% (-5.99pp); p50 0.096 ms / p99 0.306 ms; job took 19.127 s"
+        },
+        "baseline_accuracy": 0.6879,
+        "result_accuracy": 0.628,
+        "bytes_before": 392548,
+        "bytes_after": 108077,
+        "duration_s": 19.127,
+        "report_anchor": "docs/compression-eval-report.md#12-qat"
+      }
+    },
+    {
+      "id": "llm_finetune",
+      "label": {
+        "zh": "LoRA / QLoRA / DPO 微调",
+        "en": "LoRA / QLoRA / DPO fine-tuning"
+      },
+      "summary": {
+        "zh": "冻结底模只训练低秩适配器（LoRA），可再合并回底模；HuggingFace 模型需要 CUDA，PyTorch 检查点走 CPU 微型原型。",
+        "en": "Freeze the base model and train a low-rank adapter (LoRA), optionally merged back. HuggingFace models need CUDA; PyTorch checkpoints use the CPU micro prototype."
+      },
+      "group": "训练后校准",
+      "calibration": {
+        "needed": true,
+        "note": {
+          "zh": "需要指令/偏好数据：alpaca(.jsonl) 用于 SFT，hh-rlhf 用于 DPO。",
+          "en": "Needs instruction/preference data: alpaca (.jsonl) for SFT, hh-rlhf for DPO."
+        }
+      },
+      "inputs": [
+        {
+          "name": "--base-model-path",
+          "required": true,
+          "format": {
+            "zh": "HF 模型目录",
+            "en": "HF model directory"
+          }
+        },
+        {
+          "name": "--dataset-path",
+          "required": true,
+          "format": {
+            "zh": "含 .jsonl 的目录",
+            "en": "directory containing .jsonl"
+          }
+        },
+        {
+          "name": "--lora-rank / --epochs / --learning-rate",
+          "required": false,
+          "format": {
+            "zh": "rank / 轮数 / 学习率",
+            "en": "rank / epochs / lr"
+          }
+        },
+        {
+          "name": "GPU",
+          "required": true,
+          "format": {
+            "zh": "CUDA 运行时（HF 路径）",
+            "en": "CUDA runtime (HF path)"
+          }
+        }
+      ],
+      "suits": {
+        "models": [
+          "llm"
+        ],
+        "tasks": [
+          "text-generation"
+        ]
+      },
+      "effect": {
+        "compression": {
+          "zh": "不压缩底模；适配器本身仅几 MB（可单独分发）",
+          "en": "Does not compress the base model; the adapter itself is a few MB and can be shipped alone"
+        },
+        "accuracy": {
+          "zh": "取决于数据量与轮数（微调目标是任务适配，不是压缩）",
+          "en": "Depends on data and epochs (goal is task adaptation, not compression)"
+        },
+        "latency": {
+          "zh": "推理时若不合并适配器会略慢；合并后无额外开销",
+          "en": "Slightly slower if the adapter is not merged; no overhead once merged"
+        }
+      },
+      "limits": [
+        {
+          "zh": "HF 路径必须 CUDA：CPU 只有内置微型字符 LM 原型（流程验证用）。",
+          "en": "The HF path requires CUDA; CPU only has the built-in micro char-LM prototype (pipeline validation)."
+        },
+        {
+          "zh": "指令数据要能被解析（csv/xlsx/jsonl；jsonl 常见字段 instruction/input/output）。",
+          "en": "Instruction data must be parseable (csv/xlsx/jsonl; typical jsonl fields instruction/input/output)."
+        },
+        {
+          "zh": "本环境 8GB 显存：0.5B + rank 8 + max_len 128 可跑，更大模型需降 batch/长度。",
+          "en": "8 GB VRAM here: 0.5B + rank 8 + max_len 128 fits; larger models need smaller batch/length."
+        }
+      ],
+      "evidence": {
+        "dataset": "alpaca-train-32 (服务器本地)",
+        "summary": {
+          "zh": "可部署适配器 4.4 MB；另含合并模型 1976 MB（可只分发适配器）；可训练参数 1081344；末轮 loss 0.837775；耗时 19 s",
+          "en": "deployable adapter 4.4 MB; plus merged model 1976 MB (adapter alone is enough); trainable params 1081344; final loss 0.837775; took 19 s"
+        },
+        "baseline_accuracy": null,
+        "result_accuracy": null,
+        "bytes_before": null,
+        "bytes_after": 1980634709,
+        "duration_s": 19.161,
+        "report_anchor": "docs/compression-eval-report.md#49-llm_finetunelora21-qwen-lora"
+      }
+    }
+  ]
+}

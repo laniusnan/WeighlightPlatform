@@ -1,0 +1,68 @@
+# syntax=docker/dockerfile:1
+# ---------------------------------------------------------------------------
+# 模型压缩作业镜像（CPU 版，独立构建）
+#
+# 内置 /app/compress_job.py（单文件压缩 CLI），调度器可直接调用：
+#   docker run --rm -v /models:/models -v /out:/out compress-job:cpu \
+#     --job-id=1 --tenant-id=t1 --trace-id=abc \
+#     --base-model-path=/models/welding_transformer.pt \
+#     --output-dir=/out/1 --method=quantize --algo=onnx_dynamic_int8
+#
+# 构建（在仓库根目录执行）：
+#   docker build -f deploy/compress/Dockerfile.cpu -t compress-job:cpu .
+#
+# 说明：依赖与平台镜像一致（torch CPU / onnx / onnxruntime / openvino / nncf /
+# transformers / scikit-learn …），只安装 backend 运行依赖（--no-dev）。
+# ---------------------------------------------------------------------------
+FROM python:3.11
+
+# libGL/libglib：torchvision 图像算子（ultralytics → transformers）运行时需要
+RUN sed -i 's|deb.debian.org|mirrors.tuna.tsinghua.edu.cn|g' /etc/apt/sources.list.d/debian.sources \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends libgl1 libglib2.0-0 git ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+ENV PYTHONUNBUFFERED=1 \
+    UV_COMPILE_BYTECODE=1 \
+    UV_LINK_MODE=copy \
+    PATH="/app/.venv/bin:$PATH" \
+    UV_CONCURRENT_DOWNLOADS=8 \
+    UV_CONCURRENT_BUILDS=1 \
+    UV_CONCURRENT_INSTALLS=1 \
+    UV_HTTP_TIMEOUT=120
+
+RUN pip install --no-cache-dir "uv==0.9.26"
+
+WORKDIR /app
+
+# 先装依赖（利用 Docker 层缓存：改代码不必重装依赖）
+COPY pyproject.toml uv.lock /app/
+COPY backend/pyproject.toml /app/backend/pyproject.toml
+RUN uv sync --frozen --no-dev --no-install-workspace --package app
+
+# 再放业务代码并安装 workspace 包（提供 `compression` 控制台脚本）
+COPY backend/app /app/backend/app
+RUN uv sync --frozen --no-dev --package app
+
+# 单文件压缩作业入口 + 评测/示例脚本 + 可选离线 GGUF 转换工具
+COPY compress_job.py /app/compress_job.py
+COPY deploy/compress/examples /app/examples
+COPY deploy/compress/llama-cpp /opt/llama.cpp
+
+# 自包含文档：命令行参数说明 / 实验报告 / demo / 镜像定义（便于离线查阅与重建）
+COPY docs/compression-job.md /app/docs/compression-job.md
+COPY docs/compression-report.md /app/docs/compression-report.md
+COPY docs/compression-cli.md /app/docs/compression-cli.md
+COPY docs/compression-env.md /app/docs/compression-env.md
+COPY examples/compression-demo-welding.md /app/docs/compression-demo-welding.md
+COPY examples/compression-demo.md /app/docs/compression-demo.md
+COPY deploy/compress /app/deploy/compress
+
+ENV PYTHONPATH=/app/backend \
+    LLAMA_CPP_PATH=/opt/llama.cpp \
+    MODEL_STORAGE_PATH=/tmp/compress-storage
+
+WORKDIR /app
+ENTRYPOINT ["python", "/app/compress_job.py"]
+CMD ["--help"]
+
