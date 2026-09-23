@@ -1,0 +1,33 @@
+{
+  "status": "succeeded",
+  "job_id": "weld-02",
+  "tenant_id": "welding",
+  "trace_id": "",
+  "method": "quantize",
+  "algo": "onnx_dynamic_int8",
+  "base_model_path": "/out/w01-fp32-onnx/artifact/model.onnx",
+  "dataset_path": null,
+  "output_dir": "/out/w02-int8-onnx",
+  "artifact": "/out/w02-int8-onnx/artifact/model_quantized.onnx",
+  "artifact_resolved": "/out/w02-int8-onnx/artifact/model_quantized.onnx",
+  "artifact_bytes": 184041,
+  "duration_s": 2.738,
+  "metrics": {
+    "quant_type": "dynamic_int8"
+  },
+  "steps": [
+    {
+      "index": 1,
+      "method": "quantize",
+      "algo": "onnx_dynamic_int8",
+      "platform_method": "quantize_onnx",
+      "params": {},
+      "artifact": "/out/w02-int8-onnx/artifact/model_quantized.onnx",
+      "resolved": "/out/w02-int8-onnx/artifact/model_quantized.onnx",
+      "artifact_bytes": 184041,
+      "metrics": {
+        "quant_type": "dynamic_int8"
+      }
+    }
+  ]
+}

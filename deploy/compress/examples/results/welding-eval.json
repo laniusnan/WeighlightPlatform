@@ -1,0 +1,165 @@
+{
+  "baseline": {
+    "name": "baseline",
+    "model_path": "/pkg/welding-transformer-package-20260622T0620Z/model/welding_transformer.pt",
+    "size_bytes": 492041,
+    "samples": 7800,
+    "accuracy": 0.935641,
+    "loss": 0.177759,
+    "classification_report": {
+      "合格": {
+        "precision": 0.971886,
+        "recall": 0.970566,
+        "f1-score": 0.971226,
+        "support": 6625
+      },
+      "气孔": {
+        "precision": 0.730425,
+        "recall": 0.741203,
+        "f1-score": 0.735775,
+        "support": 881
+      },
+      "裂纹": {
+        "precision": 0.77193,
+        "recall": 0.733333,
+        "f1-score": 0.752137,
+        "support": 240
+      },
+      "未熔合": {
+        "precision": 0.645833,
+        "recall": 0.673913,
+        "f1-score": 0.659574,
+        "support": 46
+      },
+      "沉陷": {
+        "precision": 0.571429,
+        "recall": 1.0,
+        "f1-score": 0.727273,
+        "support": 8
+      }
+    },
+    "confusion_matrix": [
+      [
+        6430,
+        194,
+        1,
+        0,
+        0
+      ],
+      [
+        186,
+        653,
+        42,
+        0,
+        0
+      ],
+      [
+        0,
+        47,
+        176,
+        17,
+        0
+      ],
+      [
+        0,
+        0,
+        9,
+        31,
+        6
+      ],
+      [
+        0,
+        0,
+        0,
+        0,
+        8
+      ]
+    ],
+    "batch_seconds": 0.222,
+    "latency_ms_per_sample": 0.6644
+  },
+  "test_samples": 7800,
+  "candidate": {
+    "name": "candidate",
+    "model_path": "/out/w02-int8-onnx/artifact/model_quantized.onnx",
+    "size_bytes": 184041,
+    "samples": 7800,
+    "accuracy": 0.935,
+    "loss": 0.179289,
+    "classification_report": {
+      "合格": {
+        "precision": 0.972449,
+        "recall": 0.96966,
+        "f1-score": 0.971053,
+        "support": 6625
+      },
+      "气孔": {
+        "precision": 0.726667,
+        "recall": 0.742338,
+        "f1-score": 0.734419,
+        "support": 881
+      },
+      "裂纹": {
+        "precision": 0.761905,
+        "recall": 0.733333,
+        "f1-score": 0.747346,
+        "support": 240
+      },
+      "未熔合": {
+        "precision": 0.632653,
+        "recall": 0.673913,
+        "f1-score": 0.652632,
+        "support": 46
+      },
+      "沉陷": {
+        "precision": 0.571429,
+        "recall": 1.0,
+        "f1-score": 0.727273,
+        "support": 8
+      }
+    },
+    "confusion_matrix": [
+      [
+        6424,
+        200,
+        1,
+        0,
+        0
+      ],
+      [
+        182,
+        654,
+        45,
+        0,
+        0
+      ],
+      [
+        0,
+        46,
+        176,
+        18,
+        0
+      ],
+      [
+        0,
+        0,
+        9,
+        31,
+        6
+      ],
+      [
+        0,
+        0,
+        0,
+        0,
+        8
+      ]
+    ],
+    "batch_seconds": 1.206,
+    "latency_ms_per_sample": 0.1636
+  },
+  "size_reduction": 0.625964,
+  "accuracy_delta": -0.000641,
+  "loss_delta": 0.00153,
+  "meets_delivery_criteria": true
+}

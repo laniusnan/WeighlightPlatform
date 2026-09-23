@@ -24,6 +24,8 @@ import {
   taskStatusLabel,
 } from "@/components/lab/constants"
 import { ChatModal } from "@/components/lab/ChatModal"
+import { MethodAdvisorPanel } from "@/components/lab/MethodAdvisorPanel"
+import { MethodCard, MethodCardPanel, methodCard } from "@/components/lab/MethodCards"
 import { useI18n } from "@/components/lab/i18n"
 import {
   Button,
@@ -250,6 +252,7 @@ function TaskWizard({
       : (readyModels[0]?.id ?? ""),
   )
   const [method, setMethod] = useState<CompressionMethod>("export_onnx")
+  const activeCard = methodCard(method)
   const [paramValues, setParamValues] = useState<Record<string, string>>({})
   const [calibDatasetId, setCalibDatasetId] = useState("")
   const [qatDatasetId, setQatDatasetId] = useState("")
@@ -396,6 +399,11 @@ function TaskWizard({
         <p className="text-[13px] font-semibold text-[var(--lb-text-2)]">
           {t("③ 方法参数", "3. Method parameters")}
         </p>
+        {activeCard && (
+          <div className="grid gap-3 lg:grid-cols-2">
+            <MethodCard card={activeCard} />
+          </div>
+        )}
         {METHOD_PARAMS[method].length === 0 ? (
           <p className="lb-muted text-[13px]">
             {t("该压缩方法无需额外参数。", "No extra parameters for this method.")}
@@ -658,6 +666,10 @@ function CompressionsPage() {
           </Button>
         </div>
       </div>
+
+      <MethodAdvisorPanel />
+
+      <MethodCardPanel />
 
       {notice && (
         <div className="rounded-md border border-[var(--lb-success)]/40 bg-[var(--lb-success-soft)] px-4 py-2.5 text-sm text-[var(--lb-success)]">{notice}</div>

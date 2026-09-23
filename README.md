@@ -55,6 +55,27 @@
 - **命令行用法（五种等价入口）**：`python compression.py <子命令> --参数…`（推荐，免安装）·
   `python backend/app/cli/compression.py …` · `python -m app.cli.compression …`（cwd=backend）·
   `compression …`（包安装后的控制台脚本）· `scripts/compression …`（bash 包装）
+- **压缩作业 CLI（单文件、可被调度器直接调用）**：`compress_job.py`（镜像内 `/app/compress_job.py`）
+  —— `python /app/compress_job.py --job-id={{job.id}} --tenant-id={{job.tenant_id}} --trace-id={{job.trace_id}}
+  --base-model-path={{inputs.base_model_path}} --dataset-path={{inputs.dataset_path}}
+  --output-dir={{inputs.output_path}} --method=quantize --algo=onnx_dynamic_int8`
+  进程内完成压缩（无需 DB/Redis/Web），产物写 `artifact/`，报告写 `result.json`/`metrics.json`/`logs.jsonl`；
+  **所有输入都显式化**：旁挂文件不猜默认——ONNX 外部权重必须给 `--external-data-path`（文件或目录，
+  缺失退出码 3）、可用 `--model-dir` 统一相对路径基准，另有 `--llama-cpp-path`/`--hf-cache-dir`；
+  `--dry-run` 与 `result.json.inputs` 会逐项列出「参数名 / 来源 cli·env·default / 解析结果」；
+  支持 `pipeline` 多步串联、`--serve` HTTP 模式、`--dry-run` 参数预演。文档：
+  [`docs/compression-job.md`](docs/compression-job.md)（每个参数的含义/取值/作用）；
+  实测 demo：[`examples/compression-demo-welding.md`](examples/compression-demo-welding.md)
+  （焊接 Transformer：**压缩率 62.60%、精度损失 0.06%、延迟降至 1/4**）；
+  报告：[`docs/compression-report.md`](docs/compression-report.md)（同 `exp.md`）
+- **压缩能力交付包（可离线分发，环境与代码分开成包）**：[`deploy/compress/`](deploy/compress/README.md)
+  —— CPU/GPU/快速 三种 Dockerfile + 评测脚本 + demo 一键脚本；`scripts/compress-image.sh`
+  构建并 `docker save` 出**环境包** `dist/compress-job-cpu-<日期>.tar.gz`（约 1.7 GB，含 sha256），
+  `scripts/compress-bundle.sh --bundle-only` 打出**代码包** `dist/compress-code-<日期>.zip`
+  （约 0.8 MB：`compress_job.py` + **压缩引擎 `backend/app/jobs/compression.py`** + 依赖锁定文件
+  + Dockerfile + 文档 + demo，可直接 `python compress_job.py …` 跑；先用
+  `python scripts/check_compress_package.py` 自检），不带参数则打出**全量包**
+  `dist/compress-full-<日期>.zip`（代码 + 镜像 tar + SHA256SUMS）
 - **推理模块接入包（drop-in）**：[`examples/inference_module/`](examples/inference_module/README.md)
   —— FastAPI 路由（方法目录/提交/轮询/推理/产物下载/部署包/重试）+ 配置 + 实测脚本，
   不依赖平台代码，仅 `fastapi`+`httpx`+`pydantic`

@@ -247,6 +247,34 @@ models-storage/                          # = MODEL_STORAGE_PATH（容器内 /app
 | 直接推理（不下载） | `POST /api/v1/inference/predict`（CNN/ONNX/OV）或 `/inference/chat/completions`（LLM IR） | 只需传 `task_id` |
 | 重新评估 / 基准 | `POST /api/v1/compressions/{id}/reevaluate {"kind":"eval"}` | 复用任务内已存的 eval 配置 |
 
+### 5.1 命令行作业（`compress_job.py`）的输出目录、日志与进度
+
+用「单文件 CLI」跑作业（调度器旁挂 / 离线单机）时，规则固定：
+
+* **输出目录参数只叫 `--output-dir`**（环境变量 `COMPRESS_JOB_OUTPUT_DIR`；无 `--out/--outdir` 别名），
+  产物、报告、日志、进度全在它下面：
+
+```
+<output-dir>/
+├── artifact/       压缩产物（model.onnx / model_quantized.onnx / IR 目录 / *.gguf …）
+├── result.json     总报告（含 inputs 清单：参数名/来源 cli·env·default/解析结果）
+├── metrics.json    纯指标
+├── logs.jsonl      结构化日志（与 stdout 同内容，逐条 JSON Lines）
+├── progress.json   进度快照（status/step/percent/message/elapsed_s/artifact）
+├── progress.log    进度里程碑（每 10% 一行，可 tail -f）
+└── _stage/         暂存副本（内联后的 ONNX、arch.py …），跑完可删
+```
+
+* **日志两条腿**：stdout 实时打印（默认 JSON Lines；`--no-json-logs` 人类可读），同时追加到
+  `<output-dir>/logs.jsonl`；
+* **进度**：`--progress-interval`（默认 10）保证每个步骤 `0/10/…/100` 每档一行 `progress.log` +
+  一条 `progress_milestone` 日志；`progress.json` 原子更新；失败/中断也落盘 `status=failed/interrupted`；
+  `--no-progress-file` 可关闭；
+* 摘要末尾会打印「输出目录 + 已写出文件」，便于调度器核对：
+  `输出目录 : /out/1001` / `  已写出 : artifact  result.json  metrics.json  logs.jsonl  progress.json  progress.log`。
+
+详见 [`docs/compression-job.md`](../docs/compression-job.md) §5.0/§5.2/§5.3。
+
 ---
 
 ## 6. 集成到综合网站（推理模块）
