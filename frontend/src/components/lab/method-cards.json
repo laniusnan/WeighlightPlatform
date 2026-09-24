@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "generatedAt": "2026-09-23",
+  "generatedAt": "2026-09-24",
   "report": "docs/compression-eval-report.md",
   "cards": [
     {
@@ -965,12 +965,12 @@
           "en": "Comparable to static INT8 (measured −72.5%, 392,548 → 108,077 B)"
         },
         "accuracy": {
-          "zh": "实测 1 epoch/4k 图仅为 62.8%（−6.0pp）——**QAT 需要更多轮次与全量数据才能体现优势**，别指望 1 轮就超过静态 PTQ（后者 −0.11pp）",
-          "en": "Measured at 1 epoch on 4k images: only 62.8% (−6.0pp) — QAT needs more epochs and full data to pay off; one epoch does not beat static PTQ (−0.11pp)"
+          "zh": "实测**轮次是关键**：1 epoch/4k 仅 62.8%，10 epoch/4k 升到 66.8%（+4.0pp，val loss 0.9225→0.8093）；但仍低于静态 PTQ 的 68.68%——要超过 PTQ 需要全量数据（本机 50k 会被 OOM 杀）",
+          "en": "Measured: **epochs matter** — 1 epoch/4k gives 62.8%, 10 epochs/4k reach 66.8% (+4.0pp, val loss 0.9225→0.8093), still below static PTQ (68.68%); beating PTQ needs the full dataset (50k is OOM-killed on this host)"
         },
         "latency": {
-          "zh": "与静态 INT8 同级（实测 p50 0.096 ms / p99 0.306 ms）",
-          "en": "Same as static INT8 (measured p50 0.096 ms / p99 0.306 ms)"
+          "zh": "与静态 INT8 同级（10 epoch 实测 p50 0.119 ms / p99 0.433 ms）",
+          "en": "Same as static INT8 (10-epoch run: p50 0.119 ms / p99 0.433 ms)"
         }
       },
       "limits": [
@@ -987,21 +987,25 @@
           "en": "Only works on FX-traceable Conv/Linear modules; dynamic control flow fails."
         },
         {
-          "zh": "内存占用高：全量 50k 图像直接跑会被 OOM 杀掉（实测 exit 137），建议先小样本子集。",
-          "en": "Memory hungry: the full 50k-image run was OOM-killed (exit 137); start from a subset."
+          "zh": "内存占用高：全量 50k 图像跑 1 epoch 与 10 epoch 均被 OOM 杀掉（实测 exit 137 ×2），必须用子集。",
+          "en": "Memory hungry: the full 50k-image run was OOM-killed at both 1 and 10 epochs (exit 137 twice) — use a subset."
+        },
+        {
+          "zh": "轮次不够时精度会明显低于静态 PTQ（1 epoch 实测 62.8% vs 68.68%），别只看体积。",
+          "en": "With too few epochs QAT is clearly worse than static PTQ (62.8% vs 68.68% at 1 epoch) — size is not the only metric."
         }
       ],
       "evidence": {
         "dataset": "CIFAR10-test (10,000 samples)",
         "summary": {
-          "zh": "压缩率 72.5%；体积 392,548 → 108,077 B；Top-1 68.79% → 62.80%（-5.99pp）；p50 0.096 ms / p99 0.306 ms；作业耗时 19.127 s",
-          "en": "72.5% smaller; 392,548 → 108,077 B; Top-1 68.79% → 62.80% (-5.99pp); p50 0.096 ms / p99 0.306 ms; job took 19.127 s"
+          "zh": "压缩率 72.5%；体积 392,548 → 108,077 B；Top-1 68.79% → 66.83%（-1.96pp）；p50 0.119 ms / p99 0.433 ms；作业耗时 77.098 s",
+          "en": "72.5% smaller; 392,548 → 108,077 B; Top-1 68.79% → 66.83% (-1.96pp); p50 0.119 ms / p99 0.433 ms; job took 77.098 s"
         },
         "baseline_accuracy": 0.6879,
-        "result_accuracy": 0.628,
+        "result_accuracy": 0.6683,
         "bytes_before": 392548,
         "bytes_after": 108077,
-        "duration_s": 19.127,
+        "duration_s": 77.098,
         "report_anchor": "docs/compression-eval-report.md#12-qat"
       }
     },

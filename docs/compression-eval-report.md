@@ -5,7 +5,12 @@
 > 方法卡数据 `frontend/src/components/lab/method-cards.json` 由 `scripts/build_method_cards.py`
 > 从同一份 `out/summary.json` 生成 —— 报告、卡片、原始文件三处数字同源，禁止手改。
 >
-> 日期：2026-09-23 · 平台：`full-stack-fastapi`（CPU 栈 8001 / GPU 栈 8002 均在运行）
+> **复现**：下文出现的所有 `scripts/*.py`、`scripts/*.sh` 均已随仓库提交，
+> 实际路径为 **`deploy/compress/eval/`**（例如 `deploy/compress/eval/bench.py`）；
+> 脚本里的 `/work`、`/datasets` 等绝对路径对应宿主 `/home/lanius/compression-eval`、`/home/lanius/Dataset`
+> （见 `deploy/compress/README.md` 的挂载说明），换机器时按同样方式挂载即可重跑。
+>
+> 日期：2026-09-23（QAT 追加实验 2026-09-24）· 平台：`full-stack-fastapi`（CPU 栈 8001 / GPU 栈 8002 均在运行）
 
 ---
 
@@ -112,6 +117,8 @@ RSS = 整进程峰值（含加载与数据）；耗时 = `result.json.duration_s
 | 11-sparsify | `sparsify`（rate 0.3） | `model_sparse.onnx` | 380,297 B | 3.13% | 0.4897 | −19.82 | 0.133 | 0.885 | 1710 / 2277 | 333.5 MB | 10.2 s |
 | 13-distill-10ep | `distill:logits`（10 epoch） | `model_student.onnx` | 380,919 B | 2.96% | **0.6127** | −7.52 | 0.142 | 1.771 | 2258 / 2757 | 333.1 MB | 680.7 s |
 | 12-qat | `qat:fx_int8`（1 epoch / 4k 图子集） | `model_qat.onnx` | 108,077 B | 72.47% | 0.6280 | −5.99 | 0.096 | 0.306 | 2123 / 2705 | 332.8 MB | 见 §4.11 |
+| 12-qat-10ep-4k | `qat:fx_int8`（**10 epoch** / 4k 子集） | `model_qat.onnx` | 108,077 B | 72.47% | **0.6683** | **−1.96** | 0.119 | 0.433 | 1607 / 1647 | 333.5 MB | 77.1 s |
+| 12-qat-10ep-full | `qat:fx_int8`（10 epoch / **全量 50k**） | —（未产出） | — | — | — | — | — | — | — | — | 被 OOM 杀（exit 137） |
 | 22-qwen-gguf | `export_gguf`（q4_K_M） | `model_q4_K_M.gguf` | 511.4 MB | **48.8%**⁵ | 未测（PPL 见 INT4 行） | — | — | — | — | — | 31.4 s |
 | 20-qwen-int4 | `llm_quantize`（NNCF INT4） | OpenVINO IR 目录 | 339.1 MB | **66.1%**¹ | PPL 5.295（引擎轻量评测） | — | 704² | 769² | 1.34 gen/s² | 1243 MB² | 8712.9 s³ |
 | 21-qwen-lora | `llm_finetune:lora` | `adapter_lora.pt`（+merged） | **4.4 MB**（adapter） | —⁴ | loss 1.2769 → 0.8378 | — | — | — | — | — | 19.2 s |
@@ -276,6 +283,8 @@ docker run --rm -v /home/lanius/models-local:/models:ro -v /home/lanius/compress
 
 ### 4.11 `qat`（12-qat）— ✅ 已完成（FX QAT 真路径）
 
+<a id="12-qat"></a>
+
 ```bash
 # 需要 passwd 存在的用户（勿用 --user 1000）+ 小样本子集避免 OOM
 docker run --rm -v /home/lanius/Dataset:/datasets:ro -v /home/lanius/compression-eval:/work \
@@ -293,6 +302,30 @@ docker run --rm -v /home/lanius/Dataset:/datasets:ro -v /home/lanius/compression
 QAT 的价值在于「多轮次 + 全量数据」下比 PTQ 更保精度，本环境未满足该条件；
 两个踩坑已记录在方法卡里：① `--user` 未在镜像 passwd 中会让 FX QAT 静默回退到 fine-tune+PTQ；
 ② 全量 50k 图直接跑被 OOM 杀（exit 137）。
+
+**追加实验：把轮次提到 10（同一批资产，2026-09 补做）**
+
+```bash
+# ① 4k 子集 × 10 epoch → 成功（77.1 s，产物体积不变）
+--method=qat --algo=fx_int8 --epochs=10 --batch-size=64 --learning-rate=0.0005 \
+  --dataset-path=/work/datasets-derived/CIFAR10-train-4k   # → out/12-qat-10ep-4k
+# ② 全量 50k × 10 epoch → 容器在 epoch 1 约 40% 进度被 OOM 杀（exit 137，无 result.json）
+--dataset-path=/datasets/CIFAR10-train                      # → out/12-qat-10ep-full（失败）
+```
+
+| 运行 | 轮数 / 数据 | 产物 | 精度 | Δpp vs 基线 | p50 / p99 (ms) | 吞吐 b1 / b32 | 峰值 RSS | 耗时 |
+|------|-------------|------|------|-------------|----------------|---------------|----------|------|
+| `12-qat` | 1 epoch / 4k | 108,077 B | 0.6280 | −5.99 | 0.096 / 0.306 | 2123 / 2705 | 332.8 MB | 19.1 s |
+| `12-qat-10ep-4k` | **10 epoch / 4k** | 108,077 B | **0.6683** | **−1.96** | 0.119 / 0.433 | 1607 / 1647 | 333.5 MB | 77.1 s |
+| `12-qat-10ep-full` | 10 epoch / 50k | — | — | — | — | — | — | OOM（exit 137） |
+
+**结论（更新）**：轮次是**必要条件**——10 轮把精度从 62.80% 拉到 **66.83%（+4.03pp）**，
+`best_val_loss` 同步从 0.9225 降到 0.8093，量化误差确实在被训练补偿；
+但 **10 epoch / 4k 仍未追平静态 PTQ（66.83% vs 68.68%，−1.85pp）**，
+因为 4k 子集无法代表原始 50k 训练分布，学生只能在这 4k 张图上学回量化损失。
+要做出「QAT > PTQ」的可信对比，需要 **全量数据**（本机 16 GB 内存跑不下，exit 137）
+或更大子集 + 更多轮次；因此本报告**仍然不主张 QAT 优于 PTQ**，只给出这条趋势证据。
+`docs/compression-advisor.md` 的 R9 与前端方法卡已同步为这组数字（不再只引用 1 epoch）。
 
 
 ---
@@ -342,7 +375,8 @@ p50 **0.328 ms** / p99 **1.769 ms**、吞吐 1550 / 1678 样本·s⁻¹、峰值
 
 ### 5.9 未测项（明确标注，未编造）
 * `export_gguf` 的**困惑度**未单独测（GGUF 通路与 INT4 IR 通路不同，PPL 只在同一通路内可比）；体积/耗时已实测（§4.10）；
-* `qat` 只跑了 1 epoch / 4k 子集（全量会被 OOM 杀），因此**不能**用它论证「QAT 优于 PTQ」（§4.11 已如实说明）；
+* `qat` 已追加 10 epoch 长跑（4k 子集 66.83%，+4.03pp；**全量 50k 被 OOM 杀 exit 137**），
+  因此**不能**用它论证「QAT 优于 PTQ」（§4.11 已如实说明，含两轮对比表）；
 * 动态 batch 的 ONNX + INT8：已知会触发 ORT 形状限制（前序交付文档 §5.1），本次 CIFAR 任务统一用静态 batch；
 * 其余 11 个方法（§3 全部行）均为真实执行，无占位数字。
 
@@ -405,11 +439,14 @@ cd <repo>/frontend && npm run build     # 产物落到 backend/app/frontend
 
 | 项 | 位置 |
 |----|------|
-| JSON Schema | `docs/method-cards.schema.json`（draft-07；约束 id 必须属于平台 11 个方法枚举、evidьence 字段类型等） |
+| JSON Schema | `docs/method-cards.schema.json`（draft-07；约束 id 必须属于平台 11 个方法枚举、evidence 字段类型等） |
 | 数据（前端唯一内容源） | `frontend/src/components/lab/method-cards.json`（11 张卡，**11/11 均带实测证据**；由 `scripts/build_method_cards.py` 从 `out/summary.json` 生成） |
 | 方法卡文档 | [`docs/compression-advisor.md`](./compression-advisor.md) 同时给出「推荐规则表」（下面 §7.1） |
 | 组件 | `frontend/src/components/lab/MethodCards.tsx`（`MethodCardPanel` 折叠网格 + `MethodCard` 单卡 + `methodCard(id)` 查询；**JSX 内零硬编码文案**） |
-| 接入点 | `frontend/src/routes/lab/compressions.tsx`：① 页面标题下方 `<MethodCardPanel />`（分组筛选 + 展开）；② 新建压缩向导「② 压缩方法」选中后即时显示 `activeCard` |
+| 推荐引擎 | `frontend/src/components/lab/methodAdvisor.ts`（纯函数 `recommend(input)` + `adviseForWizard(method, ctx)`；组合方法「剪枝+量化流水线」的卡片在此合成，因为它不在平台 11 个枚举内） |
+| 推荐 UI | `frontend/src/components/lab/MethodAdvisorPanel.tsx`：`MethodAdvisorPanel`（页面级 10 项输入表单 + 排序结果 + 可复制命令）与 `InlineMethodHint`（向导内嵌紧凑提示，含「当前选择是否被推荐」与一键改用首选） |
+| 接入点 | `frontend/src/routes/lab/compressions.tsx`：① 页面标题下方 `<MethodCardPanel />`（分组筛选 + 展开）；② 新建压缩向导「② 压缩方法」选中后即时显示 `activeCard`；③ 同一位置渲染 `<InlineMethodHint />`（按已选模型/数据集实时推荐，并校验当前方法选择） |
+| 单元测试 | `frontend/tests/unit/methodAdvisor.test.ts`（22 个用例 / 1,957 断言，覆盖 LLM 与视觉两条主线、数据分水岭、参数矩阵不变量、向导集成；`npm run test:unit` = `bun test tests/unit`，无需浏览器与后端）。**该测试发现并修复了一个真实缺陷**：`targetCompressionPct ≥ 60` 时引用了不存在的卡片 `pipeline-prune-quant`，导致推荐面板直接抛错 |
 | 样式一致性 | 复用 `Card/Pill/Button/cx` 与 `lb-*` 变量类；`Pill` 只用既有 `PillTone`（`ready/pending/info/idle`） |
 | 构建验证 | `npm run build` 通过（tsc + vite），产物写入 `backend/app/frontend`（平台直接可访问）；`npm run lint` 的 7 个报错均为**既有文件**（index.html / BenchmarkRadar / ui.tsx），与本次新增文件无关 |
 
@@ -426,7 +463,9 @@ cd <repo>/frontend && npm run build     # 产物落到 backend/app/frontend
 | `/home/lanius/compression-eval/out/<task>/{progress.json,progress.log,logs.jsonl}` | 进度与结构化日志 |
 | `/home/lanius/compression-eval/out/summary.json` | 汇总（报告与方法卡共用数据源） |
 | `/home/lanius/compression-eval/models/CifarCNN10/` | 基线模型 + `train_report.json`（含 12 轮曲线） |
-| `/home/lanius/compression-eval/scripts/` | `train_cifar10.py`、`bench.py`、`bench_llm.py`、`collect_results.py`、`build_method_cards.py`、`prep_llm_corpus.py`、`run_cifar_tasks.sh`、`run_more_tasks.sh`、`run_llm_tasks.sh` |
+| `/home/lanius/compression-eval/scripts/` | `train_cifar10.py`、`bench.py`、`bench_llm.py`、`collect_results.py`、`build_method_cards.py`、`prep_llm_corpus.py`、`run_cifar_tasks.sh`、`run_more_tasks.sh`、`run_llm_tasks.sh`、`run_qat_long.sh`（**同一份已随仓库提交：`deploy/compress/eval/`**） |
+| `/home/lanius/compression-eval/out/12-qat-10ep-4k/` | QAT 10 epoch / 4k 子集（0.6683，本报告 §4.11 追加实验） |
+| `/home/lanius/compression-eval/out/12-qat-10ep-full/` | QAT 10 epoch / 全量 50k：**失败留证**（`progress.json` 到 epoch 1 约 40%，容器 exit 137） |
 | `/home/lanius/compression-eval/datasets-derived/alpaca-eval.txt` | LLM 困惑度派生语料（32 行 alpaca） |
 
 

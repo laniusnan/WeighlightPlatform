@@ -24,7 +24,7 @@ import {
   taskStatusLabel,
 } from "@/components/lab/constants"
 import { ChatModal } from "@/components/lab/ChatModal"
-import { MethodAdvisorPanel } from "@/components/lab/MethodAdvisorPanel"
+import { InlineMethodHint, MethodAdvisorPanel } from "@/components/lab/MethodAdvisorPanel"
 import { MethodCard, MethodCardPanel, methodCard } from "@/components/lab/MethodCards"
 import { useI18n } from "@/components/lab/i18n"
 import {
@@ -266,6 +266,10 @@ function TaskWizard({
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState("")
 
+  // 供「方法推荐」内嵌提示使用：当前选中的模型 + 是否已指定训练/校准数据集
+  const selectedModel = readyModels.find((m) => m.id === modelId)
+  const wizardHasDataset = Boolean(qatDatasetId || calibDatasetId)
+
   const setParam = (key: string, value: string) =>
     setParamValues((prev) => ({ ...prev, [key]: value }))
 
@@ -395,6 +399,19 @@ function TaskWizard({
             })}
           </div>
         </div>
+
+        {/* 按当前模型 / 数据集给出即时推荐，并校验当前选择是否被推荐（规则见 methodAdvisor.ts） */}
+        <InlineMethodHint
+          method={method}
+          applicableMethods={METHOD_META.map((m) => m.value)}
+          context={{
+            framework: selectedModel?.framework ?? null,
+            modelName: selectedModel?.name ?? null,
+            modelBytes: selectedModel?.size_bytes ?? null,
+            hasDataset: wizardHasDataset,
+          }}
+          onApply={(next) => setMethod(next as CompressionMethod)}
+        />
 
         <p className="text-[13px] font-semibold text-[var(--lb-text-2)]">
           {t("③ 方法参数", "3. Method parameters")}
