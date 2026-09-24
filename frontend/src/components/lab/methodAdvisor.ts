@@ -51,8 +51,72 @@ export interface AdvisorRecommendation {
 
 function card(id: string): MethodCardData {
   const found = METHOD_CARDS.find((item) => item.id === id)
-  if (!found) throw new Error(`unknown method card: ${id}`)
-  return found
+  if (found) return found
+  if (id === PIPELINE_CARD.id) return PIPELINE_CARD
+  throw new Error(`unknown method card: ${id}`)
+}
+
+/**
+ * 组合方法卡：平台方法枚举里没有「流水线」，但 `--method=pipeline` 是一个真实可跑的组合，
+ * 因此这里用实测（docs/compression-eval-report.md §4/§5）合成一张卡，避免在 JSX 里硬编码文案。
+ */
+const PIPELINE_CARD: MethodCardData = {
+  id: "pipeline-prune-quant",
+  label: { zh: "剪枝 + 量化流水线", en: "Prune + quantize pipeline" },
+  summary: {
+    zh: "prune:l2（结构化剪枝）→ quantize:onnx_dynamic_int8 串联：体积最小的一档，但精度继承剪枝损失",
+    en: "Chain prune:l2 (structured) with onnx_dynamic_int8: the smallest artifact, but accuracy inherits the pruning damage",
+  },
+  group: "剪枝 / 稀疏化",
+  calibration: {
+    needed: false,
+    note: { zh: "L2 剪枝与动态量化都不需要校准集", en: "Neither L2 pruning nor dynamic quantization needs calibration data" },
+  },
+  inputs: [
+    {
+      name: "--pipeline",
+      required: true,
+      format: { zh: '"prune:l2,quantize:onnx_dynamic_int8"', en: '"prune:l2,quantize:onnx_dynamic_int8"' },
+    },
+    { name: "--arch-file", required: true, format: { zh: "模型定义 .py", en: "model definition .py" } },
+    { name: "--rate", required: true, format: { zh: "剪枝率（实测 0.3）", en: "prune rate (0.3 measured)" } },
+  ],
+  suits: {
+    models: ["cnn"],
+    tasks: ["image-classification", "object-detection"],
+  },
+  effect: {
+    compression: { zh: "实测 −86.2%（392,548 → 54,159 B）", en: "Measured −86.2% (392,548 → 54,159 B)" },
+    accuracy: {
+      zh: "实测 Top-1 0.2026（−48.5pp）——必须接 QAT/微调补偿",
+      en: "Measured Top-1 0.2026 (−48.5pp) — QAT/fine-tuning is mandatory",
+    },
+    latency: { zh: "p50 0.328 ms / p99 1.769 ms", en: "p50 0.328 ms / p99 1.769 ms" },
+  },
+  limits: [
+    {
+      zh: "精度继承剪枝损失：裸剪枝实测只有 0.20 左右，不能只看体积",
+      en: "Accuracy inherits the pruning loss (bare pruning measured ≈0.20) — size is not the only metric",
+    },
+    { zh: "需要 arch.py，且只支持含 Conv2d 的 CNN", en: "Needs arch.py; CNN (Conv2d) only" },
+    {
+      zh: "建议流水线后再接 --method=qat / 微调（CLI 已支持）",
+      en: "Follow with --method=qat or fine-tuning (CLI supports it)",
+    },
+  ],
+  evidence: {
+    dataset: "CIFAR10-test (10,000 samples)",
+    summary: {
+      zh: "压缩率 86.2%；54,159 B；Top-1 68.79% → 20.26%（−48.53pp）；p50 0.328 ms / p99 1.769 ms；作业耗时 15.0 s",
+      en: "86.2% smaller; 54,159 B; Top-1 68.79% → 20.26% (−48.53pp); p50 0.328 ms / p99 1.769 ms; job took 15.0 s",
+    },
+    baseline_accuracy: 0.6879,
+    result_accuracy: 0.2026,
+    bytes_before: 392548,
+    bytes_after: 54159,
+    duration_s: 15.0,
+    report_anchor: "docs/compression-eval-report.md#3-结果总表cifar-10全部真实执行",
+  },
 }
 
 const HAS_IMAGES = new Set<AdvisorData>(["small-images", "full-images"])
@@ -175,9 +239,13 @@ export function recommend(input: AdvisorInput): AdvisorRecommendation[] {
   }
   if (isVision && hasImages && tightAccuracy) {
     add("qat", 88, [
-      `精度预算${input.accuracyBudgetPp}pp 很紧时，QAT（FX 训练中模拟量化）通常比训练后量化高 0.5~2pp`,
+      `精度预算${input.accuracyBudgetPp}pp 很紧时，QAT（训练中模拟量化）比训练后量化更有机会保住精度`,
+      "实测**轮次是关键**：1 epoch / 4k 只有 62.8%，10 epoch / 4k 升到 66.83%（+4.03pp，val loss 0.9225→0.8093）",
       "CLI 已支持：--method=qat --algo=fx_int8|lsq",
-    ], ["需要训练时间与算力，CPU 上建议先 --max-samples 小样本试跑"])
+    ], [
+      "10 epoch / 4k 仍未追平静态 PTQ（66.83% vs 68.68%）：要超过 PTQ 需要全量数据，而本机全量 50k 会被 OOM 杀（exit 137）",
+      "需要训练时间与算力，CPU 上建议先用子集试跑",
+    ])
   }
   if (isVision && hasImages && !bigCompression) {
     add("distill", 60, [
@@ -242,4 +310,88 @@ export const ADVISOR_DEFAULT: AdvisorInput = {
   needSpeed: true,
   needLlamaCpp: false,
   needTaskAdaptation: false,
+}
+
+/* ------------------------------------------------------------------ 向导集成 */
+
+/** 新建任务向导里已知的信息（其余指标沿用 ADVISOR_DEFAULT 的保守默认值）。 */
+export interface WizardContext {
+  /** ModelPublic.framework（huggingface 视为 LLM） */
+  framework?: string | null
+  /** 模型名（用于兜底识别 LLM，如 Qwen2.5-0.5B） */
+  modelName?: string | null
+  /** 模型体积（字节） */
+  modelBytes?: number | null
+  /** 是否已选择训练 / 校准数据集 */
+  hasDataset?: boolean
+}
+
+export interface WizardHint {
+  input: AdvisorInput
+  primary: AdvisorRecommendation
+  alternatives: AdvisorRecommendation[]
+  /** 当前选中的方法在推荐列表中的条目（若未被推荐则为 undefined） */
+  selected?: AdvisorRecommendation
+  selectedRecommended: boolean
+  /** 当前选择不在推荐列表时的针对性说明 */
+  warning: string
+}
+
+const LLM_FRAMEWORKS = new Set(["huggingface", "transformers", "gguf", "vllm", "ollama"])
+const LLM_NAME_PATTERN = /(qwen|llama|mistral|gemma|phi|chat|gpt|llm)/i
+
+/** 把向导里的模型/数据集状态映射成推荐引擎的输入。 */
+export function wizardInput(context: WizardContext): AdvisorInput {
+  const framework = String(context.framework ?? "").toLowerCase()
+  const isLlm = LLM_FRAMEWORKS.has(framework) || LLM_NAME_PATTERN.test(String(context.modelName ?? ""))
+  const hasDataset = Boolean(context.hasDataset)
+  const modelMb =
+    typeof context.modelBytes === "number" && context.modelBytes > 0
+      ? Number((context.modelBytes / 1024 / 1024).toFixed(1))
+      : ADVISOR_DEFAULT.modelMb
+  return {
+    ...ADVISOR_DEFAULT,
+    modelKind: isLlm ? "llm" : "cnn",
+    task: isLlm ? "text-generation" : "image-classification",
+    modelMb,
+    data: isLlm ? (hasDataset ? "instruction" : "none") : hasDataset ? "full-images" : "none",
+  }
+}
+
+const NEEDS_IMAGES = new Set(["quantize_onnx_static", "openvino_int8"])
+const NEEDS_TRAINING = new Set(["qat", "distill"])
+const LLM_ONLY = new Set(["llm_quantize", "llm_finetune", "export_gguf"])
+const VISION_ONLY = new Set(["prune", "sparsify", "qat", "distill"])
+
+function mismatchReason(method: string, input: AdvisorInput): string {
+  if (input.data === "none") {
+    if (NEEDS_IMAGES.has(method)) return "该方法需要图片校准集，当前没有可用数据集"
+    if (NEEDS_TRAINING.has(method)) return "该方法需要训练 / 微调数据集，当前没有可用数据集"
+  }
+  if (input.modelKind !== "llm" && LLM_ONLY.has(method)) {
+    return "该方法面向 HuggingFace LLM，当前模型不是 LLM"
+  }
+  if (input.modelKind === "llm" && VISION_ONLY.has(method)) {
+    return "该方法面向含 Conv2d 的 CNN（需 arch.py），LLM 请走 INT4 / GGUF 路线"
+  }
+  return "按当前条件它的匹配度低于上面的首选（理由见首选）"
+}
+
+/**
+ * 给「新建任务向导」用的即时提示：基于当前模型与数据集，推荐首选/备选方法，
+ * 并判断用户当前选中的方法是否在推荐内（不在则给出针对性原因 + 可一键改用首选）。
+ */
+export function adviseForWizard(method: string, context: WizardContext): WizardHint {
+  const input = wizardInput(context)
+  const ranked = recommend(input)
+  const [primary, ...rest] = ranked
+  const selected = ranked.find((item) => item.card.id === method)
+  return {
+    input,
+    primary,
+    alternatives: rest.slice(0, 2),
+    selected,
+    selectedRecommended: Boolean(selected),
+    warning: selected ? "" : mismatchReason(method, input),
+  }
 }

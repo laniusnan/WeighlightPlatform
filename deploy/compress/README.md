@@ -9,6 +9,7 @@ deploy/compress/
 ├── Dockerfile.gpu            # GPU 作业镜像（CUDA 12.6 wheels，供 LoRA/DPO 微调）
 ├── Dockerfile.fast           # 快速构建：复用已有平台镜像（秒级）
 ├── llama-cpp/                # 可选：离线 GGUF 转换工具（放 convert_hf_to_gguf.py）
+├── eval/                     # 本次能力评估用的脚本工具链（README 见 eval/README.md）
 └── examples/
     ├── welding_eval.py       # 表格分类模型精度/延迟评测脚本（复现训练切分）
     ├── welding_demo.sh       # 焊接模型压缩 demo 一键脚本
@@ -27,6 +28,10 @@ deploy/compress/
 | `scripts/check_compress_package.py` | **代码包自检**（布局/引擎入口/CLI），见 §2 |
 | `docs/compression-job.md` | **命令行与参数说明**（每个参数的含义、取值、作用） |
 | `docs/compression-report.md` / `exp.md` | **实验报告**（压缩率/精度损失实测） |
+| `docs/compression-eval-report.md` | **完整评估报告**（服务器现有资产 × 13+ 任务真实执行、QAT 10 epoch 追加实验、未测项如实标注） |
+| `docs/compression-advisor.md` | **方法推荐规则表**（R1–R12，每条都引用实测数字；前端推荐面板与向导提示即按此实现） |
+| `deploy/compress/eval/` | 评估脚本工具链（训练基线、精度/延迟基准、结果汇总、方法卡生成），见 `eval/README.md` |
+| `frontend/tests/unit/` | 推荐引擎单元测试（`cd frontend && npm run test:unit`，22 用例 / 1,957 断言） |
 | `examples/compression-demo-welding.md` | **demo 文档**（焊接模型逐步操作 + 结论） |
 
 ---

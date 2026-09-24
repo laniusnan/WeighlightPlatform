@@ -15,6 +15,8 @@ import {
   type AdvisorInput,
   type AdvisorModelKind,
   type AdvisorTask,
+  type WizardContext,
+  adviseForWizard,
   recommend,
 } from "@/components/lab/methodAdvisor"
 import { Button, Card, Pill, SelectField, TextField, cx } from "@/components/lab/ui"
@@ -201,3 +203,85 @@ export function MethodAdvisorPanel() {
     </Card>
   )
 }
+
+/**
+ * 「新建任务向导」内嵌的即时提示：按当前模型 / 数据集推断条件，给出首选方法，
+ * 并校验用户当前选中的方法是否在推荐内（不在则说明原因，且可一键改用首选）。
+ * 纯展示组件，规则全部来自 ./methodAdvisor.ts。
+ */
+export function InlineMethodHint({
+  method,
+  context,
+  applicableMethods,
+  onApply,
+}: {
+  method: string
+  context: WizardContext
+  /** 向导里可选的方法（平台枚举）；不在其中的建议（如剪枝+量化流水线）不提供「改用」按钮 */
+  applicableMethods: readonly string[]
+  onApply: (method: string) => void
+}) {
+  const { t, locale } = useI18n()
+  const tr = (zh: string, en: string) => (locale === "en" ? en : zh)
+  const hint = adviseForWizard(method, context)
+  const primaryLabel = tr(hint.primary.card.label.zh, hint.primary.card.label.en)
+  const canApply = applicableMethods.includes(hint.primary.card.id)
+  const dataOption = DATA_OPTIONS.find((option) => option.value === hint.input.data)
+  const dataLabel = dataOption ? tr(dataOption.zh, dataOption.en) : hint.input.data
+  const modelLabel = hint.input.modelKind === "llm" ? "LLM" : tr("CNN / 视觉", "CNN / vision")
+
+  return (
+    <div className="space-y-2 rounded-md border border-[var(--lb-primary)]/30 bg-[var(--lb-primary-soft)] px-3.5 py-2.5">
+      <div className="flex flex-wrap items-center gap-2">
+        <Compass size={13} className="text-[var(--lb-primary)]" />
+        <span className="text-[12.5px] font-semibold text-[var(--lb-text)]">
+          {t("方法推荐", "Method advisor")}
+        </span>
+        <Pill tone="ready">
+          {tr("首选", "Primary")} {primaryLabel}
+        </Pill>
+        <span className="lb-muted text-[11px]">
+          {tr("匹配度", "score")} {hint.primary.score}
+        </span>
+        {hint.selectedRecommended ? (
+          <Pill tone="info">{tr("当前选择在推荐内", "Your pick is recommended")}</Pill>
+        ) : (
+          <Pill tone="failed">{tr("当前选择未被推荐", "Not recommended here")}</Pill>
+        )}
+      </div>
+
+      <p className="text-[12px] leading-snug text-[var(--lb-text-2)]">{hint.primary.reasons[0]}</p>
+
+      {hint.alternatives.length > 0 && (
+        <p className="lb-muted text-[11.5px]">
+          {tr("备选：", "Alternatives: ")}
+          {hint.alternatives
+            .map((item) => tr(item.card.label.zh, item.card.label.en))
+            .join(" · ")}
+        </p>
+      )}
+
+      {hint.warning && (
+        <p className="flex gap-1.5 text-[12px] leading-snug text-[var(--lb-danger)]">
+          <TriangleAlert size={12} className="mt-0.5 shrink-0" />
+          <span>{hint.warning}</span>
+        </p>
+      )}
+
+      <div className="flex flex-wrap items-center gap-2">
+        {!hint.selectedRecommended && canApply && (
+          <Button size="sm" variant="outline" onClick={() => onApply(hint.primary.card.id)}>
+            {tr(`改用「${primaryLabel}」`, `Switch to ${primaryLabel}`)}
+          </Button>
+        )}
+        <span className="lb-muted text-[11px]">
+          {tr(
+            `推断条件：${modelLabel} · 数据：${dataLabel} · 设备：通用 CPU；规则与实测依据见 docs/compression-advisor.md`,
+            `Inferred: ${modelLabel} · data: ${dataLabel} · device: generic CPU; rules from docs/compression-advisor.md`,
+          )}
+        </span>
+      </div>
+    </div>
+  )
+}
+
