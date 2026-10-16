@@ -48,6 +48,9 @@ EXCLUDES=(
   --exclude=.env
   --exclude=.env.cpu
   --exclude='*.log'
+  # 本地 SSH 密钥：曾误提交至仓库/服务器（见 docs/security-gitignore-audit.md 补记）
+  --exclude=lanius
+  --exclude=lanius.pub
 )
 
 # 1/5 同步代码

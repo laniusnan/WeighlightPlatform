@@ -34,3 +34,7 @@ dist/
 .env.gpu
 .env.*
 !.env.*.example
+
+# 本地 SSH 密钥：严禁入库（曾于 2026-09-03 首次快照被 git add -A 误提交，2026-10-16 清理）
+lanius
+lanius.pub

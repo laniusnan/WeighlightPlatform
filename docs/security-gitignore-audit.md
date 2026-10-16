@@ -34,3 +34,21 @@ git ls-files | grep -E '\\.env($|\\.)'                                   # 仅 .
 ## 5. 建议（可选）
 - 首次推送后到 gitee 页面复核一次文件树
 - 真实服务器 `.env.cpu` 若曾用弱口令，建议在 gitee 后台关掉“示例明文展示”相关疑虑前轮换一次口令
+
+## 6. 补记（2026-10-16）：漏判的本地 SSH 密钥已清理
+
+**发现**：`lanius`（OpenSSH ed25519 私钥，带口令加密）与其公钥 `lanius.pub` 一直处于已跟踪状态，自首次快照提交（2026-09-03）起存在于全部历史中；gitee 上的 `cpu-server` 分支（独立历史）同样携带这两个文件。第 2 节的过滤条件按**文件名关键字**匹配（`\.env|secret|\.pem$|\.key$|password`），`lanius` 既无扩展名也无关键字，导致漏判——**原结论“无真实密钥/口令入库”作废**。
+
+**性质（取证结论）**：该密钥对在项目内无任何引用（无脚本/CI/Dockerfile/文档以路径引用它），未注册到 GitHub（账号下 3 把公钥指纹均不含 `SHA256:WRaGW34naTL3jqODJq0z5fBcRwlNM30FKWRi5j1Vy1o`），部署免密依赖系统默认密钥 `~/.ssh/id_ed25519`。判定为 2026-09-03 搭建 SSH 时误留在项目根目录、被 `git add -A` 快照扫入的“孤儿”密钥。
+
+**处理**：
+- 从索引移除，并加入 `.gitignore`、`.dockerignore` 与 `scripts/deploy-to-server.sh` 的 rsync 排除列表
+- 用 `git filter-branch --index-filter 'git rm --cached --ignore-unmatch lanius lanius.pub' --prune-empty -- --branches` 重写 `master` 与 `cpu-server` 全历史，并强推 gitee / GitHub
+
+**改进后的例行检查（按内容而非文件名，应无输出）**：
+```bash
+git grep -lE 'BEGIN [A-Z ]*PRIVATE KEY' $(git rev-list --all)
+git rev-list --all --objects | grep -iE 'lanius(\.pub)?$'
+git ls-files | grep -iE '(^|/)\.env|secret|\.pem$|\.key$|password|id_(rsa|ed25519)'
+```
+> 注：第一行刻意写成 `BEGIN [A-Z ]*PRIVATE KEY` 正则形式，避免本文件转述该字符串时产生自匹配。
